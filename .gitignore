@@ -7,6 +7,7 @@ __pycache__/
 # Runtime data
 logs/*.jsonl
 memory/sessions/*.json
+memory/reports/*.md
 
 # Generated project output (LLM artifacts, not source)
 projects/*/

@@ -4,6 +4,7 @@ import typer
 from rich import print
 
 from core.orchestrator import Orchestrator
+from memory.report import save_report
 from memory.store import save_session
 
 
@@ -16,9 +17,11 @@ def run(brief: str) -> None:
 
     result = orchestrator.run()
 
-    path = save_session(result)
+    path        = save_session(result)
+    report_path = save_report(result)
 
-    print(f"[green]Session gespeichert:[/green] {path}")
+    print(f"[green]Session:[/green] {path}")
+    print(f"[green]Report: [/green] {report_path}")
 
 
 if __name__ == "__main__":
