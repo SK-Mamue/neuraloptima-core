@@ -14,7 +14,7 @@ You are a senior code reviewer. Analyze the provided project files and return a 
 Return ONLY valid JSON — no markdown fences, no explanation.
 """
 
-_REVIEW_FILES = ["requirements.txt", "schemas.py", "database.py", "models.py", "crud.py", "main.py", "README.md"]
+_REVIEW_FILES = ["requirements.txt", "schemas.py", "database.py", "models.py", "utils.py", "crud.py", "main.py", "README.md"]
 _REVIEW_SUBDIRS = ("crud", "routers")
 _MAX_FILE_CHARS = 3_000  # per-file cap to stay under rate limits
 
@@ -37,7 +37,7 @@ class ReviewAgent:
         t0 = time.monotonic()
         try:
             raw, usage = ask_claude(
-                prompt=self._build_prompt(files),
+                prompt=self._build_prompt(files, project_dir),
                 system=SYSTEM_PROMPT,
             )
             result = self._parse(raw)
@@ -68,6 +68,17 @@ class ReviewAgent:
         return result
 
     # ------------------------------------------------------------------ #
+
+    def _file_tree(self, project_dir: Path) -> str:
+        _SKIP = {"__pycache__", ".git", ".venv", "manifest.json"}
+        _EXTS = {".py", ".txt", ".md", ".env", ".cfg", ".toml", ".ini"}
+        lines: list[str] = []
+        for p in sorted(project_dir.rglob("*")):
+            if any(part in _SKIP for part in p.relative_to(project_dir).parts):
+                continue
+            if p.is_file() and p.suffix in _EXTS:
+                lines.append(f"  {p.relative_to(project_dir)}")
+        return "\n".join(lines)
 
     def _collect_files(self, project_dir: Path) -> dict[str, str]:
         files: dict[str, str] = {}
@@ -100,12 +111,25 @@ class ReviewAgent:
             text = text[:_MAX_FILE_CHARS] + f"\n... [truncated — {len(text)} chars total]"
         return text
 
-    def _build_prompt(self, files: dict[str, str]) -> str:
+    def _build_prompt(self, files: dict[str, str], project_dir: Path | None = None) -> str:
         brief = self.session.brief
         parts = [
             f"Project: {brief.title}",
             f"Description: {brief.description}",
             "",
+        ]
+
+        if project_dir is not None:
+            tree = self._file_tree(project_dir)
+            if tree:
+                parts += [
+                    "Complete list of files present in this project (ground truth — do NOT",
+                    "report any file listed here as missing):",
+                    tree,
+                    "",
+                ]
+
+        parts += [
             "Review the following generated project files:",
             "",
         ]
@@ -116,7 +140,8 @@ class ReviewAgent:
             "Return a JSON object with these exact fields:",
             '  "architecture_notes": [strings — architecture observations]',
             '  "bugs_found": [strings — obvious bugs or logic errors]',
-            '  "missing_files": [strings — files that should exist but are absent]',
+            '  "missing_files": [strings — files that MUST exist for the project to work',
+            '                    but are absent from the file list above]',
             '  "security_issues": [strings — security vulnerabilities]',
             '  "production_notes": [strings — production-readiness recommendations]',
             '  "severity": "ok" | "warning" | "severe"',

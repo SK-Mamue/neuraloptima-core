@@ -150,6 +150,21 @@ class TestBuildPrompt:
                       "security_issues", "production_notes", "severity", "summary"):
             assert field in prompt
 
+    def test_file_tree_injected_when_project_dir_given(self, tmp_path: Path):
+        (tmp_path / "main.py").write_text("app = None")
+        (tmp_path / "utils.py").write_text("pass")
+        session = _make_session(str(tmp_path))
+        agent = ReviewAgent(session)
+        prompt = agent._build_prompt({"main.py": "app = None"}, project_dir=tmp_path)
+        assert "utils.py" in prompt
+        assert "do NOT" in prompt  # ground-truth instruction present
+
+    def test_file_tree_absent_without_project_dir(self):
+        session = _make_session()
+        agent = ReviewAgent(session)
+        prompt = agent._build_prompt({"main.py": "app = None"})
+        assert "ground truth" not in prompt
+
 
 # ── review() integration (mocked LLM) ────────────────────────────────────
 
