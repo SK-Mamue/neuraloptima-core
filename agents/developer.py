@@ -26,6 +26,7 @@ _FILENAME_MAP = [
     (["schema", "pydantic"], "schemas.py"),
     (["database", "sqlite", "db", "initialization"], "database.py"),
     (["model", "sqlalchemy"], "models.py"),
+    (["utility", "utilities", "helper", "helpers", "util"], "utils.py"),
     # main.py before crud.py: titles like "Build FastAPI app with CRUD endpoints" must
     # land in main.py, not crud.py. "error"/"exception" cross-cutting tasks also go here.
     (["main", "fastapi", "endpoint", "application", "error", "exception"], "main.py"),
@@ -34,7 +35,7 @@ _FILENAME_MAP = [
 ]
 
 # Files worth injecting as context so Claude understands the project shape
-_CONTEXT_FILES = ["requirements.txt", "schemas.py", "database.py", "models.py", "crud.py", "main.py"]
+_CONTEXT_FILES = ["requirements.txt", "schemas.py", "database.py", "models.py", "utils.py", "crud.py", "main.py"]
 
 # Matches the first line that looks like valid Python — used to drop leading prose in .py output.
 _FIRST_PY_LINE_RE = re.compile(

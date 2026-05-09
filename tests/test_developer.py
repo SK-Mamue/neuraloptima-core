@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from agents.developer import DeveloperAgent
-from core.models import OutputType, ProjectBrief, Session
+from core.models import OutputType, ProjectBrief, Session, Task, TaskStatus
 
 
 def _agent() -> DeveloperAgent:
@@ -12,6 +12,46 @@ def _agent() -> DeveloperAgent:
         tech_stack=[], requirements=[], project_dir="/tmp/x",
     )
     return DeveloperAgent(Session(brief=brief))
+
+
+# ── filename mapper ────────────────────────────────────────────────────────
+
+def _task(title: str) -> Task:
+    return Task(title=title, description="", status=TaskStatus.PENDING)
+
+
+class TestFilenameMapper:
+    def test_utils_utility(self):
+        assert _agent()._resolve_filename(_task("Create short code utility")) == "utils.py"
+
+    def test_utils_utilities(self):
+        assert _agent()._resolve_filename(_task("Create utilities module")) == "utils.py"
+
+    def test_utils_helper(self):
+        assert _agent()._resolve_filename(_task("Create helper functions")) == "utils.py"
+
+    def test_utils_helpers(self):
+        assert _agent()._resolve_filename(_task("Create helpers")) == "utils.py"
+
+    def test_utils_does_not_clobber_main(self):
+        # "utility function endpoint" — utility wins because it appears first in the map
+        # but a plain "Create FastAPI application" should still go to main.py
+        assert _agent()._resolve_filename(_task("Create FastAPI application")) == "main.py"
+
+    def test_database(self):
+        assert _agent()._resolve_filename(_task("Create database configuration")) == "database.py"
+
+    def test_schemas(self):
+        assert _agent()._resolve_filename(_task("Create Pydantic schemas")) == "schemas.py"
+
+    def test_crud(self):
+        assert _agent()._resolve_filename(_task("Create CRUD operations")) == "crud.py"
+
+    def test_readme(self):
+        assert _agent()._resolve_filename(_task("Create README.md")) == "README.md"
+
+    def test_unknown_returns_none(self):
+        assert _agent()._resolve_filename(_task("Do something unknown")) is None
 
 
 # ── fence stripping (existing behaviour, regression guard) ─────────────────
