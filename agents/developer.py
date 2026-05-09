@@ -16,6 +16,11 @@ SYSTEM_PROMPT = """\
 You are a senior software engineer generating production-quality Python code.
 Return ONLY the raw file content — no markdown fences, no explanation, no commentary.
 The output will be written directly to a file.
+
+PYTHON RULES — violations cause runtime errors and are never acceptable:
+- Never shadow a type with a same-named field. If a Pydantic model needs a field
+  called 'date', alias the import: `from datetime import date as Date` and annotate
+  the field as `date: Date`. The same applies to 'id', 'type', 'list', 'dict', etc.
 """
 
 # Static map — checked first; first match wins.
