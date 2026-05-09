@@ -10,6 +10,7 @@ from rich.text import Text
 from rich import get_console
 from core.models import TaskStatus
 
+from core.agent_registry import registry as agent_registry
 from core.manifest import save_manifest
 from core.orchestrator import Orchestrator
 from memory.report import report_path, save_report
@@ -70,6 +71,26 @@ def list_sessions(n: int = typer.Option(20, "--limit", "-n", help="Max sessions 
             f"{done}/{total}",
             cost,
             status_icon,
+        )
+
+    get_console().print(table)
+
+
+@app.command()
+def agents() -> None:
+    """List available agents and their capabilities."""
+    table = Table(title="Agent Registry", show_lines=True, expand=False)
+    table.add_column("Name",         style="cyan",  min_width=9,  no_wrap=True)
+    table.add_column("Role",         style="white", min_width=14, no_wrap=True)
+    table.add_column("Description",  style="dim",   max_width=22, no_wrap=True, overflow="ellipsis")
+    table.add_column("Capabilities", style="green", min_width=20)
+
+    for spec in agent_registry.list():
+        table.add_row(
+            spec.name,
+            spec.role,
+            spec.description,
+            ", ".join(spec.capabilities),
         )
 
     get_console().print(table)
