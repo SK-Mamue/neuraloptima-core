@@ -98,6 +98,34 @@ class TestCollectFiles:
         files = agent._collect_files(tmp_path)
         assert set(files.keys()) == {"main.py"}
 
+    def test_collects_crud_subdir_files(self, tmp_path: Path):
+        (tmp_path / "crud").mkdir()
+        (tmp_path / "crud" / "__init__.py").write_text("")
+        (tmp_path / "crud" / "expenses.py").write_text("def get(): pass", encoding="utf-8")
+        session = _make_session(str(tmp_path))
+        agent = ReviewAgent(session)
+        files = agent._collect_files(tmp_path)
+        assert "crud/expenses.py" in files
+        assert "__init__.py" not in " ".join(files.keys())
+
+    def test_collects_routers_subdir_files(self, tmp_path: Path):
+        (tmp_path / "routers").mkdir()
+        (tmp_path / "routers" / "categories.py").write_text("router = None", encoding="utf-8")
+        session = _make_session(str(tmp_path))
+        agent = ReviewAgent(session)
+        files = agent._collect_files(tmp_path)
+        assert "routers/categories.py" in files
+
+    def test_large_file_truncated(self, tmp_path: Path):
+        from agents.reviewer import _MAX_FILE_CHARS
+        big = "x = 1\n" * (_MAX_FILE_CHARS // 6 + 100)
+        (tmp_path / "main.py").write_text(big, encoding="utf-8")
+        session = _make_session(str(tmp_path))
+        agent = ReviewAgent(session)
+        files = agent._collect_files(tmp_path)
+        assert len(files["main.py"]) <= _MAX_FILE_CHARS + 80  # cap + truncation note
+        assert "truncated" in files["main.py"]
+
 
 # ── _build_prompt ─────────────────────────────────────────────────────────
 

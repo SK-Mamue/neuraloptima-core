@@ -15,6 +15,8 @@ Return ONLY valid JSON — no markdown fences, no explanation.
 """
 
 _REVIEW_FILES = ["requirements.txt", "schemas.py", "database.py", "models.py", "crud.py", "main.py", "README.md"]
+_REVIEW_SUBDIRS = ("crud", "routers")
+_MAX_FILE_CHARS = 3_000  # per-file cap to stay under rate limits
 
 
 class ReviewAgent:
@@ -73,10 +75,30 @@ class ReviewAgent:
             path = project_dir / fname
             if path.exists():
                 try:
-                    files[fname] = path.read_text(encoding="utf-8")
+                    files[fname] = self._read_capped(path)
                 except Exception:
                     pass
+
+        for subdir in _REVIEW_SUBDIRS:
+            subpath = project_dir / subdir
+            if not subpath.is_dir():
+                continue
+            for p in sorted(subpath.glob("*.py")):
+                if p.name == "__init__.py":
+                    continue
+                key = f"{subdir}/{p.name}"
+                try:
+                    files[key] = self._read_capped(p)
+                except Exception:
+                    pass
+
         return files
+
+    def _read_capped(self, path: Path) -> str:
+        text = path.read_text(encoding="utf-8")
+        if len(text) > _MAX_FILE_CHARS:
+            text = text[:_MAX_FILE_CHARS] + f"\n... [truncated — {len(text)} chars total]"
+        return text
 
     def _build_prompt(self, files: dict[str, str]) -> str:
         brief = self.session.brief
