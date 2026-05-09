@@ -3,9 +3,9 @@ from __future__ import annotations
 import traceback
 from pathlib import Path
 
-from core.llm import ask_claude
+from core.llm import ask_claude, compute_cost
 from core.logger import Logger
-from core.models import Session, Task, TaskStatus
+from core.models import Session, Task, TaskStatus, utc_now
 from tools.filesystem import ensure_dir, read_file, write_file
 
 
@@ -41,6 +41,7 @@ class DeveloperAgent:
 
     def run_task(self, task: Task) -> Task:
         task.status = TaskStatus.RUNNING
+        task.started_at = utc_now()
         self.logger.info(event="task_started", detail=task.title)
 
         project_dir = ensure_dir(self.session.brief.project_dir)
@@ -49,22 +50,36 @@ class DeveloperAgent:
         if filename is None:
             task.result_summary = f"No filename mapping for task: {task.title}"
             task.status = TaskStatus.DONE
+            task.completed_at = utc_now()
+            task.duration_seconds = (task.completed_at - task.started_at).total_seconds()
             self.logger.warning(event="task_skipped", detail=task.title)
             return task
 
         try:
             prompt = self._build_prompt(task, filename, project_dir)
-            raw = ask_claude(prompt=prompt, system=SYSTEM_PROMPT)
+            raw, usage = ask_claude(prompt=prompt, system=SYSTEM_PROMPT)
             code = self._extract_code(raw)
             self._write(project_dir, filename, code, task)
+
+            task.tokens_used["input_tokens"]  = (task.tokens_used.get("input_tokens",  0) + usage.input_tokens)
+            task.tokens_used["output_tokens"] = (task.tokens_used.get("output_tokens", 0) + usage.output_tokens)
+            self.session.total_cost_usd += compute_cost(usage)
+
             self.logger.info(
                 event="task_completed",
                 detail=task.title,
-                extra={"file": filename, "bytes": len(code)},
+                extra={
+                    "file": filename,
+                    "bytes": len(code),
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                },
             )
         except Exception as exc:
             task.status = TaskStatus.FAILED
             task.error = traceback.format_exc()
+            task.completed_at = utc_now()
+            task.duration_seconds = (task.completed_at - task.started_at).total_seconds()
             self.logger.error(
                 event="task_failed",
                 detail=str(exc),
@@ -73,6 +88,8 @@ class DeveloperAgent:
             return task
 
         task.status = TaskStatus.DONE
+        task.completed_at = utc_now()
+        task.duration_seconds = (task.completed_at - task.started_at).total_seconds()
         return task
 
     # ------------------------------------------------------------------ #

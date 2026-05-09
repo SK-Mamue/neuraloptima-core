@@ -6,7 +6,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from core.llm import ask_claude
+from core.llm import ask_claude, compute_cost
 from core.logger import Logger
 from core.models import Session
 from tools.filesystem import read_file, write_file
@@ -130,8 +130,14 @@ class ProjectValidator:
         self.logger.info(event="repair_attempt", detail=target.name)
 
         try:
-            raw = ask_claude(prompt=prompt, system=REPAIR_SYSTEM)
+            raw, usage = ask_claude(prompt=prompt, system=REPAIR_SYSTEM)
             fixed = _strip_fences(raw)
+            self.session.total_cost_usd += compute_cost(usage)
+            self.logger.info(
+                event="repair_tokens",
+                detail=target.name,
+                extra={"input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens},
+            )
         except Exception as exc:
             self.logger.error(event="repair_llm_error", detail=str(exc))
             return

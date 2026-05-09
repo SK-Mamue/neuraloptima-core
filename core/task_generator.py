@@ -9,15 +9,22 @@ from core.models import Task
 SYSTEM_PROMPT = """
 You are a senior software architect.
 
-Return ONLY valid JSON.
+Return ONLY valid JSON — no markdown, no commentary.
 
 Format:
 [
   {
     "title": "...",
-    "description": "..."
+    "description": "...",
+    "depends_on": []
   }
 ]
+
+Rules:
+- "depends_on" is a list of task titles that must complete before this task starts.
+- Use exact title strings from earlier entries in the same array.
+- The first task always has an empty depends_on list.
+- Every file that imports from another generated file must depend on the task that creates it.
 """
 
 
@@ -30,7 +37,7 @@ Project Brief:
 Generate implementation tasks as JSON array.
 """
 
-    response = ask_claude(
+    response, _ = ask_claude(
         prompt=prompt,
         system=SYSTEM_PROMPT,
     )
@@ -61,6 +68,7 @@ Generate implementation tasks as JSON array.
             Task(
                 title=item["title"],
                 description=item["description"],
+                depends_on=item.get("depends_on", []),
             )
         )
 

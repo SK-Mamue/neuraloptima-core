@@ -50,14 +50,17 @@ class Task(BaseModel):
     id: str = Field(default_factory=lambda: new_id("task"))
     title: str
     description: str
+    depends_on: list[str] = Field(default_factory=list)  # titles of tasks that must run first
     status: TaskStatus = TaskStatus.PENDING
     result_summary: str = ""
     files_created: list[str] = Field(default_factory=list)
     files_modified: list[str] = Field(default_factory=list)
     commands_run: list[str] = Field(default_factory=list)
     error: str = ""
+    tokens_used: dict[str, int] = Field(default_factory=dict)  # input_tokens, output_tokens
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    duration_seconds: float | None = None
 
 
 class LogEntry(BaseModel):
@@ -78,6 +81,7 @@ class Session(BaseModel):
     started_at: datetime = Field(default_factory=utc_now)
     completed_at: datetime | None = None
     total_cost_usd: float = 0.0
+    validation_duration_seconds: float | None = None
 
     def add_log(self, event: str, detail: str, level: str = "info", task_id: str | None = None) -> None:
         self.log.append(LogEntry(level=level, task_id=task_id, event=event, detail=detail))
