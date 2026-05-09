@@ -9,7 +9,7 @@ logs/*.jsonl
 memory/sessions/*.json
 
 # Generated project output (LLM artifacts, not source)
-projects/generated-project/
+projects/*/
 
 # Archives / local backups
 _archive/

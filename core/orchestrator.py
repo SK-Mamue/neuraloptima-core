@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import re
 import time
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 
 from agents.developer import DeveloperAgent
@@ -48,6 +50,23 @@ def _topo_sort(tasks: list[Task]) -> list[Task]:
         return tasks
 
     return result
+
+
+def _slug(title: str) -> str:
+    """Turn a brief title into a safe directory name: lowercase, hyphenated, max 40 chars."""
+    s = title.lower().strip()
+    s = re.sub(r"[^a-z0-9\s-]", "", s)
+    s = re.sub(r"[\s-]+", "-", s).strip("-")
+    return s[:40] or "project"
+
+
+def _resolve_project_dir(slug: str) -> str:
+    """Return projects/<slug>; append a timestamp suffix if the directory already exists."""
+    base = Path("projects") / slug
+    if not base.exists():
+        return str(base)
+    suffix = datetime.now().strftime("%m%d-%H%M")
+    return str(Path("projects") / f"{slug}-{suffix}")
 
 
 class Orchestrator:
@@ -141,13 +160,16 @@ class Orchestrator:
         first_line = brief_text.strip().splitlines()[0]
         title = first_line.replace("Build", "").strip().title() if first_line else "Generated Project"
 
+        project_dir = _resolve_project_dir(_slug(title))
+        print(f"\n=== WORKSPACE ===\n  {project_dir}\n")
+
         brief = ProjectBrief(
             title=title,
             description=brief_text,
             output_type=OutputType.API,
             tech_stack=[],
             requirements=[],
-            project_dir="./projects/generated-project",
+            project_dir=project_dir,
         )
 
         session = Session(brief=brief)
