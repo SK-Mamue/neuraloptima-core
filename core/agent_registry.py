@@ -5,19 +5,40 @@ from pydantic import BaseModel
 
 # Forward reference — Task is imported inside the function to avoid a circular import.
 def assign_agent(task: "Task") -> str:  # type: ignore[name-defined]  # noqa: F821
-    """Return the agent name best suited for this task based on title + description keywords."""
-    text = f"{task.title} {task.description}".lower()
+    """Match on title first; fall back to description only if the title gives no signal."""
+    title = task.title.lower()
+    desc  = task.description.lower()
 
-    if any(k in text for k in ("plan", "breakdown", "decompose", "task list")):
-        return "planner"
-    if any(k in text for k in ("architect", "database", "schema", "model", "migration", "entity")):
-        return "architect"
-    if any(k in text for k in ("test", "pytest", "unit test", "integration test", "coverage")):
-        return "qa"
-    if any(k in text for k in ("deploy", "docker", "dockerfile", "infra", "ci/cd", "kubernetes", "nginx")):
-        return "devops"
-    if any(k in text for k in ("code", "api", "backend", "crud", "endpoint", "route", "implement", "function", "class", "readme", "requirements")):
-        return "developer"
+    def _match(keywords: tuple[str, ...], text: str) -> bool:
+        return any(k in text for k in keywords)
+
+    _PLANNER  = ("plan", "breakdown", "decompose", "task list")
+    _ARCHITECT = ("database", "schema", "model", "migration", "entity", "architect")
+    _QA       = ("test", "pytest", "unit test", "integration test", "coverage")
+    _DEVOPS   = ("deploy", "docker", "dockerfile", "infra", "ci/cd", "kubernetes", "nginx")
+    _DEV      = ("api", "backend", "crud", "endpoint", "route", "implement", "function",
+                 "class", "readme", "requirements", "application", "fastapi", "code")
+
+    for keywords, agent in [
+        (_PLANNER,   "planner"),
+        (_ARCHITECT, "architect"),
+        (_QA,        "qa"),
+        (_DEVOPS,    "devops"),
+        (_DEV,       "developer"),
+    ]:
+        if _match(keywords, title):
+            return agent
+
+    # Title gave no signal — try description
+    for keywords, agent in [
+        (_PLANNER,   "planner"),
+        (_ARCHITECT, "architect"),
+        (_QA,        "qa"),
+        (_DEVOPS,    "devops"),
+    ]:
+        if _match(keywords, desc):
+            return agent
+
     return "developer"
 
 
