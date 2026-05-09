@@ -7,6 +7,11 @@ from core.models import Session, TaskStatus
 REPORTS_DIR = Path("memory/reports")
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
+
+def report_path(session_id: str) -> Path:
+    return REPORTS_DIR / f"{session_id}.md"
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
 _STATUS_ICON = {
     TaskStatus.DONE:    "✅",
     TaskStatus.FAILED:  "❌",

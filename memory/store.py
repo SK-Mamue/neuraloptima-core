@@ -32,6 +32,22 @@ def load_session(session_id: str) -> Session:
     return Session.model_validate(data)
 
 
+def find_session(session_id: str) -> Session | None:
+    """Accept full session ID or the short hex suffix; return None if not found."""
+    full_id = session_id if session_id.startswith("session_") else f"session_{session_id}"
+    path = session_file(full_id)
+    if path.exists():
+        with path.open("r", encoding="utf-8") as f:
+            return Session.model_validate(json.load(f))
+    # Prefix match so callers can pass a short unambiguous prefix
+    prefix = full_id[len("session_"):]
+    for p in sorted(MEMORY_DIR.glob("session_*.json")):
+        if p.stem[len("session_"):].startswith(prefix):
+            with p.open("r", encoding="utf-8") as f:
+                return Session.model_validate(json.load(f))
+    return None
+
+
 def load_all_sessions() -> list[Session]:
     sessions = []
     for path in sorted(MEMORY_DIR.glob("*.json")):

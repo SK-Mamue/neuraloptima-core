@@ -4,6 +4,7 @@ from pathlib import Path
 
 import typer
 from rich import print
+from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from rich import get_console
@@ -11,8 +12,8 @@ from core.models import TaskStatus
 
 from core.manifest import save_manifest
 from core.orchestrator import Orchestrator
-from memory.report import save_report
-from memory.store import load_all_sessions, save_session
+from memory.report import report_path, save_report
+from memory.store import find_session, load_all_sessions, save_session
 
 
 app = typer.Typer()
@@ -72,6 +73,67 @@ def list_sessions(n: int = typer.Option(20, "--limit", "-n", help="Max sessions 
         )
 
     get_console().print(table)
+
+
+_STATUS_ICON = {"completed": "✅", "failed": "❌", "running": "⏳", "pending": "⏳", "done": "✅", "skipped": "⏭️"}
+
+
+@app.command()
+def show(session_id: str) -> None:
+    """Show details for a single session."""
+    console = get_console()
+
+    session = find_session(session_id)
+    if session is None:
+        print(f"[red]No session found matching '[bold]{session_id}[/bold]'.[/red]")
+        raise typer.Exit(1)
+
+    brief    = session.brief
+    tasks    = session.tasks
+    task_dur = sum(t.duration_seconds or 0.0 for t in tasks)
+    val_dur  = session.validation_duration_seconds or 0.0
+    duration = task_dur + val_dur
+    status_val = session.status.value if hasattr(session.status, "value") else str(session.status)
+    status_icon = _STATUS_ICON.get(status_val, "?")
+    short_id = session.id.replace("session_", "")
+
+    # ── Header panel ────────────────────────────────────────────────────
+    meta = Text()
+    meta.append("Workspace  ", style="dim")
+    meta.append(f"{brief.project_dir}\n")
+    meta.append("Session    ", style="dim")
+    meta.append(f"{short_id}\n")
+    meta.append("Status     ", style="dim")
+    meta.append(f"{status_icon} {status_val}\n")
+    meta.append("Cost       ", style="dim")
+    meta.append(f"${session.total_cost_usd:.4f}\n", style="green")
+    meta.append("Duration   ", style="dim")
+    meta.append(f"{duration:.1f}s")
+    console.print(Panel(meta, title=f"[bold]{brief.title}[/bold]", expand=False))
+
+    # ── Task table ───────────────────────────────────────────────────────
+    table = Table(show_lines=False, expand=False, box=None, padding=(0, 1))
+    table.add_column("#",        justify="right",  style="dim",   no_wrap=True)
+    table.add_column("Title",    style="white",    min_width=32,  no_wrap=True, overflow="ellipsis")
+    table.add_column("St",       justify="center",               no_wrap=True)
+    table.add_column("Duration", justify="right",  style="cyan",  no_wrap=True)
+    table.add_column("Tries",    justify="center", style="dim",   no_wrap=True)
+    table.add_column("Files",    style="dim",                    no_wrap=True, overflow="ellipsis")
+
+    for i, t in enumerate(tasks, 1):
+        t_status = t.status.value if hasattr(t.status, "value") else str(t.status)
+        icon     = _STATUS_ICON.get(t_status, "?")
+        dur      = f"{t.duration_seconds:.1f}s" if t.duration_seconds is not None else "—"
+        tries    = str(t.attempts_made) if t.attempts_made else "1"
+        files    = ", ".join(Path(f).name for f in t.files_created) if t.files_created else "—"
+        table.add_row(str(i), t.title, icon, dur, tries, files)
+
+    console.print(table)
+
+    # ── Report path ─────────────────────────────────────────────────────
+    rp = report_path(session.id)
+    if rp.exists():
+        console.print(f"\n[dim]Report:[/dim] {rp}")
 
 
 if __name__ == "__main__":
