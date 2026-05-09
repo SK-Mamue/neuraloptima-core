@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# Runtime data
+logs/*.jsonl
+memory/sessions/*.json
+
+# Archives / local backups
+_archive/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

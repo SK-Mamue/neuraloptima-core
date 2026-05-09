@@ -1,0 +1,15 @@
+[project]
+name = "neuraloptima-core"
+version = "0.1.0"
+description = "Practical AI Developer Worker"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic",
+    "pydantic",
+    "typer",
+    "rich",
+    "python-dotenv"
+]
+
+[project.scripts]
+neuraloptima = "cli:app"

@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from enum import Enum
+from pathlib import Path
+from uuid import uuid4
+
+from pydantic import BaseModel, Field
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid4().hex[:12]}"
+
+
+class OutputType(str, Enum):
+    API = "api"
+    WEBSITE = "website"
+    DASHBOARD = "dashboard"
+    SCRAPER = "scraper"
+    AUTOMATION = "automation"
+    CRM = "crm"
+    DEPLOYMENT = "deployment"
+    OTHER = "other"
+
+
+class TaskStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class ProjectBrief(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("brief"))
+    title: str
+    description: str
+    output_type: OutputType = OutputType.OTHER
+    tech_stack: list[str] = Field(default_factory=list)
+    requirements: list[str] = Field(default_factory=list)
+    project_dir: str
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class Task(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("task"))
+    title: str
+    description: str
+    status: TaskStatus = TaskStatus.PENDING
+    result_summary: str = ""
+    files_created: list[str] = Field(default_factory=list)
+    files_modified: list[str] = Field(default_factory=list)
+    commands_run: list[str] = Field(default_factory=list)
+    error: str = ""
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+class LogEntry(BaseModel):
+    timestamp: datetime = Field(default_factory=utc_now)
+    level: str = "info"
+    task_id: str | None = None
+    event: str
+    detail: str
+
+
+class Session(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("session"))
+    brief: ProjectBrief
+    tasks: list[Task] = Field(default_factory=list)
+    log: list[LogEntry] = Field(default_factory=list)
+    git_commit_message: str = ""
+    status: str = "running"
+    started_at: datetime = Field(default_factory=utc_now)
+    completed_at: datetime | None = None
+    total_cost_usd: float = 0.0
+
+    def add_log(self, event: str, detail: str, level: str = "info", task_id: str | None = None) -> None:
+        self.log.append(LogEntry(level=level, task_id=task_id, event=event, detail=detail))
+
+    def complete(self) -> None:
+        self.status = "completed"
+        self.completed_at = utc_now()
+
+
+def ensure_project_dir(path: str) -> Path:
+    project_path = Path(path).expanduser().resolve()
+    project_path.mkdir(parents=True, exist_ok=True)
+    return project_path
