@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import traceback
 from pathlib import Path
 
@@ -55,36 +56,58 @@ class DeveloperAgent:
             self.logger.warning(event="task_skipped", detail=task.title)
             return task
 
-        try:
-            prompt = self._build_prompt(task, filename, project_dir)
-            raw, usage = ask_claude(prompt=prompt, system=SYSTEM_PROMPT)
-            code = self._extract_code(raw)
-            self._write(project_dir, filename, code, task)
+        last_exc: Exception | None = None
+        last_tb: str = ""
 
-            task.tokens_used["input_tokens"]  = (task.tokens_used.get("input_tokens",  0) + usage.input_tokens)
-            task.tokens_used["output_tokens"] = (task.tokens_used.get("output_tokens", 0) + usage.output_tokens)
-            self.session.total_cost_usd += compute_cost(usage)
+        for attempt in range(task.max_retries + 1):
+            task.attempts_made = attempt + 1
+            try:
+                prompt = self._build_prompt(task, filename, project_dir)
+                raw, usage = ask_claude(prompt=prompt, system=SYSTEM_PROMPT)
+                code = self._extract_code(raw)
+                self._write(project_dir, filename, code, task)
 
-            self.logger.info(
-                event="task_completed",
-                detail=task.title,
-                extra={
-                    "file": filename,
-                    "bytes": len(code),
-                    "input_tokens": usage.input_tokens,
-                    "output_tokens": usage.output_tokens,
-                },
-            )
-        except Exception as exc:
+                task.tokens_used["input_tokens"]  = (task.tokens_used.get("input_tokens",  0) + usage.input_tokens)
+                task.tokens_used["output_tokens"] = (task.tokens_used.get("output_tokens", 0) + usage.output_tokens)
+                self.session.total_cost_usd += compute_cost(usage)
+
+                self.logger.info(
+                    event="task_completed",
+                    detail=task.title,
+                    extra={
+                        "file": filename,
+                        "bytes": len(code),
+                        "input_tokens": usage.input_tokens,
+                        "output_tokens": usage.output_tokens,
+                        "attempt": attempt + 1,
+                    },
+                )
+                last_exc = None
+                break  # success
+
+            except Exception as exc:
+                last_exc = exc
+                last_tb = traceback.format_exc()
+                if attempt < task.max_retries:
+                    delay = task.retry_delay_s * (2 ** attempt)
+                    self.logger.warning(
+                        event="task_retry",
+                        detail=task.title,
+                        extra={"attempt": attempt + 1, "of": task.max_retries + 1, "delay_s": delay},
+                    )
+                    time.sleep(delay)
+                else:
+                    self.logger.error(
+                        event="task_failed",
+                        detail=str(exc),
+                        extra={"task": task.title, "attempts": task.attempts_made},
+                    )
+
+        if last_exc is not None:
             task.status = TaskStatus.FAILED
-            task.error = traceback.format_exc()
+            task.error = last_tb
             task.completed_at = utc_now()
             task.duration_seconds = (task.completed_at - task.started_at).total_seconds()
-            self.logger.error(
-                event="task_failed",
-                detail=str(exc),
-                extra={"task": task.title},
-            )
             return task
 
         task.status = TaskStatus.DONE

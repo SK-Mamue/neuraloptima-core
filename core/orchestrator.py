@@ -114,7 +114,8 @@ class Orchestrator:
             dur = task.duration_seconds or 0.0
             task_total += dur
             title = task.title if len(task.title) <= W else task.title[:W - 1] + "…"
-            print(f"  {title:<{W}} {dur:>6.1f}s")
+            retry_tag = f"  ⟳ retry {task.attempts_made - 1}×" if task.attempts_made > 1 else ""
+            print(f"  {title:<{W}} {dur:>6.1f}s{retry_tag}")
 
         val_dur = self.session.validation_duration_seconds
         if val_dur is not None:

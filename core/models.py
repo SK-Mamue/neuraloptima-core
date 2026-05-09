@@ -51,7 +51,10 @@ class Task(BaseModel):
     title: str
     description: str
     depends_on: list[str] = Field(default_factory=list)  # titles of tasks that must run first
+    max_retries: int = 1        # extra attempts on transient failure (1 = 2 total attempts)
+    retry_delay_s: float = 2.0  # initial sleep before first retry; doubles each attempt
     status: TaskStatus = TaskStatus.PENDING
+    attempts_made: int = 0      # populated at runtime for observability
     result_summary: str = ""
     files_created: list[str] = Field(default_factory=list)
     files_modified: list[str] = Field(default_factory=list)
