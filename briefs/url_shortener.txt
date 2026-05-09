@@ -1,0 +1,12 @@
+Build a URL shortener REST API.
+
+Requirements:
+- FastAPI
+- SQLite (store original URL, short code, click count, created_at)
+- POST /shorten — accepts a long URL, returns a short code
+- GET /{code} — redirects to the original URL, increments click count
+- GET /stats/{code} — returns URL info and click count
+- DELETE /links/{code} — deletes a link
+- Short codes: 6 random alphanumeric characters
+- requirements.txt
+- README.md
