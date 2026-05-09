@@ -3,6 +3,24 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 
+# Forward reference — Task is imported inside the function to avoid a circular import.
+def assign_agent(task: "Task") -> str:  # type: ignore[name-defined]  # noqa: F821
+    """Return the agent name best suited for this task based on title + description keywords."""
+    text = f"{task.title} {task.description}".lower()
+
+    if any(k in text for k in ("plan", "breakdown", "decompose", "task list")):
+        return "planner"
+    if any(k in text for k in ("architect", "database", "schema", "model", "migration", "entity")):
+        return "architect"
+    if any(k in text for k in ("test", "pytest", "unit test", "integration test", "coverage")):
+        return "qa"
+    if any(k in text for k in ("deploy", "docker", "dockerfile", "infra", "ci/cd", "kubernetes", "nginx")):
+        return "devops"
+    if any(k in text for k in ("code", "api", "backend", "crud", "endpoint", "route", "implement", "function", "class", "readme", "requirements")):
+        return "developer"
+    return "developer"
+
+
 class AgentSpec(BaseModel):
     name: str
     role: str

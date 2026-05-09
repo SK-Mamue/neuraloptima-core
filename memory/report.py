@@ -79,8 +79,8 @@ def _render(session: Session) -> str:
     L += [
         "## Tasks",
         "",
-        "| # | Title | Status | File | Duration | Attempts |",
-        "|---|-------|--------|------|----------|----------|",
+        "| # | Title | Agent | Status | File | Duration | Attempts |",
+        "|---|-------|-------|--------|------|----------|----------|",
     ]
     for i, task in enumerate(tasks, 1):
         icon     = _STATUS_ICON.get(task.status, "?")
@@ -89,7 +89,7 @@ def _render(session: Session) -> str:
         attempts = str(task.attempts_made) if task.attempts_made else "—"
         retry    = f" ⟳{task.attempts_made - 1}" if task.attempts_made > 1 else ""
         L.append(
-            f"| {i} | {task.title} | {icon} {task.status.value.title()} "
+            f"| {i} | {task.title} | {task.assigned_agent} | {icon} {task.status.value.title()} "
             f"| {file_col} | {dur} | {attempts}{retry} |"
         )
     L += ["", "---", ""]

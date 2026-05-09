@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from agents.developer import DeveloperAgent
+from core.agent_registry import assign_agent
 from core.logger import Logger
 from core.models import OutputType, ProjectBrief, Session, Task
 from core.task_generator import generate_tasks_from_brief
@@ -78,10 +79,13 @@ class Orchestrator:
     def run(self) -> Session:
         self.session.tasks = _topo_sort(self.session.tasks)
 
+        for task in self.session.tasks:
+            task.assigned_agent = assign_agent(task)
+
         print("\n=== EXECUTION ORDER ===")
         for i, task in enumerate(self.session.tasks, 1):
             deps = f"  (after: {', '.join(task.depends_on)})" if task.depends_on else ""
-            print(f"  {i}. {task.title}{deps}")
+            print(f"  {i}. [{task.assigned_agent}] {task.title}{deps}")
         print()
 
         for task in self.session.tasks:

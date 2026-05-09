@@ -60,6 +60,7 @@ class Task(BaseModel):
     files_modified: list[str] = Field(default_factory=list)
     commands_run: list[str] = Field(default_factory=list)
     error: str = ""
+    assigned_agent: str = "developer"
     tokens_used: dict[str, int] = Field(default_factory=dict)  # input_tokens, output_tokens
     started_at: datetime | None = None
     completed_at: datetime | None = None

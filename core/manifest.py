@@ -23,6 +23,7 @@ def save_manifest(session: Session) -> Path:
         "tasks": [
             {
                 "title":            t.title,
+                "assigned_agent":   t.assigned_agent,
                 "status":           t.status.value,
                 "files_created":    t.files_created,
                 "duration_seconds": round(t.duration_seconds, 2) if t.duration_seconds is not None else None,

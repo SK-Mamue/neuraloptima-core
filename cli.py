@@ -134,12 +134,13 @@ def show(session_id: str) -> None:
 
     # ── Task table ───────────────────────────────────────────────────────
     table = Table(show_lines=False, expand=False, box=None, padding=(0, 1))
-    table.add_column("#",        justify="right",  style="dim",   no_wrap=True)
-    table.add_column("Title",    style="white",    min_width=32,  no_wrap=True, overflow="ellipsis")
-    table.add_column("St",       justify="center",               no_wrap=True)
-    table.add_column("Duration", justify="right",  style="cyan",  no_wrap=True)
-    table.add_column("Tries",    justify="center", style="dim",   no_wrap=True)
-    table.add_column("Files",    style="dim",                    no_wrap=True, overflow="ellipsis")
+    table.add_column("#",        justify="right",  style="dim",  min_width=2,  no_wrap=True)
+    table.add_column("Title",    style="white",                  min_width=22, no_wrap=True, overflow="ellipsis")
+    table.add_column("Agent",    style="cyan",                   min_width=9,  no_wrap=True)
+    table.add_column("St",       justify="center",               min_width=2,  no_wrap=True)
+    table.add_column("Dur",      justify="right",  style="cyan", min_width=5,  no_wrap=True)
+    table.add_column("Tries",    justify="center", style="dim",  min_width=5,  no_wrap=True)
+    table.add_column("Files",    style="dim",                    min_width=8,  no_wrap=True, overflow="ellipsis")
 
     for i, t in enumerate(tasks, 1):
         t_status = t.status.value if hasattr(t.status, "value") else str(t.status)
@@ -147,7 +148,7 @@ def show(session_id: str) -> None:
         dur      = f"{t.duration_seconds:.1f}s" if t.duration_seconds is not None else "—"
         tries    = str(t.attempts_made) if t.attempts_made else "1"
         files    = ", ".join(Path(f).name for f in t.files_created) if t.files_created else "—"
-        table.add_row(str(i), t.title, icon, dur, tries, files)
+        table.add_row(str(i), t.title, t.assigned_agent, icon, dur, tries, files)
 
     console.print(table)
 
