@@ -74,13 +74,13 @@ registry = ToolRegistry()
 registry.register(Tool(
     name="python_compile",
     description="Check all .py files in a directory for syntax errors.",
-    command=["python", "-m", "compileall"],
+    command=["python3", "-m", "compileall"],
 ))
 
 registry.register(Tool(
     name="app_import_check",
     description="Verify the FastAPI app can be imported without errors.",
-    command=["python", "-c", "from main import app; print('import ok')"],
+    command=["python3", "-c", "from main import app; print('import ok')"],
 ))
 
 registry.register(Tool(
