@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -74,17 +75,17 @@ registry = ToolRegistry()
 registry.register(Tool(
     name="python_compile",
     description="Check all .py files in a directory for syntax errors.",
-    command=["python3", "-m", "compileall"],
+    command=[sys.executable, "-m", "compileall"],
 ))
 
 registry.register(Tool(
     name="app_import_check",
     description="Verify the FastAPI app can be imported without errors.",
-    command=["python3", "-c", "from main import app; print('import ok')"],
+    command=[sys.executable, "-c", "from main import app; print('import ok')"],
 ))
 
 registry.register(Tool(
     name="pip_install_requirements",
     description="Install dependencies listed in requirements.txt.",
-    command=["pip", "install", "-r", "requirements.txt", "-q"],
+    command=[sys.executable, "-m", "pip", "install", "-r", "requirements.txt", "-q"],
 ))

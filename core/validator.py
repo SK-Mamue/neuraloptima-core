@@ -49,7 +49,12 @@ class ProjectValidator:
             errors.append(f"compileall failed:\n{r.output.strip()}")
             failed.update(self._find_files(r.output))
 
-        # 2) import check (cwd = project dir so relative imports resolve)
+        # 2) install project dependencies so the import check can resolve them
+        req = self.project_dir / "requirements.txt"
+        if req.exists():
+            registry.run("pip_install_requirements", cwd=str(self.project_dir))
+
+        # 3) import check (cwd = project dir so relative imports resolve)
         r = registry.run("app_import_check", cwd=str(self.project_dir))
         if not r.success:
             errors.append(f"import check failed:\n{r.output.strip()}")
