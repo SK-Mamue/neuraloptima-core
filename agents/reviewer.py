@@ -14,7 +14,7 @@ You are a senior code reviewer. Analyze the provided project files and return a 
 Return ONLY valid JSON — no markdown fences, no explanation.
 """
 
-_REVIEW_FILES = ["requirements.txt", "schemas.py", "database.py", "models.py", "crud.py", "main.py"]
+_REVIEW_FILES = ["requirements.txt", "schemas.py", "database.py", "models.py", "crud.py", "main.py", "README.md"]
 
 
 class ReviewAgent:
