@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 import traceback
 from pathlib import Path
@@ -35,6 +36,14 @@ _FILENAME_MAP = [
 # Files worth injecting as context so Claude understands the project shape
 _CONTEXT_FILES = ["requirements.txt", "schemas.py", "database.py", "models.py", "crud.py", "main.py"]
 
+# Matches the first line that looks like valid Python — used to drop leading prose in .py output.
+_FIRST_PY_LINE_RE = re.compile(
+    r"^(from |import |#|class |def |\"\"\"|\'\'\'"
+    r"|__[a-z_]"        # __all__, __future__, etc.
+    r"|[A-Z_]{2,} *=)", # module-level constants, e.g. BASE_URL =
+    re.MULTILINE,
+)
+
 
 class DeveloperAgent:
     def __init__(self, session: Session):
@@ -66,7 +75,7 @@ class DeveloperAgent:
             try:
                 prompt = self._build_prompt(task, filename, project_dir)
                 raw, usage = ask_claude(prompt=prompt, system=SYSTEM_PROMPT)
-                code = self._extract_code(raw)
+                code = self._extract_code(raw, filename)
                 self._write(project_dir, filename, code, task)
 
                 task.tokens_used["input_tokens"]  = (task.tokens_used.get("input_tokens",  0) + usage.input_tokens)
@@ -174,8 +183,8 @@ class DeveloperAgent:
                     pass
         return context
 
-    def _extract_code(self, raw: str) -> str:
-        """Strip any markdown code fences the model might have added despite instructions."""
+    def _extract_code(self, raw: str, filename: str = "") -> str:
+        """Strip markdown fences; for .py files also remove any leading prose text."""
         text = raw.strip()
         for fence in ("```python", "```txt", "```markdown", "```bash", "```"):
             if text.startswith(fence):
@@ -183,7 +192,14 @@ class DeveloperAgent:
                 break
         if text.endswith("```"):
             text = text[:-3]
-        return text.strip() + "\n"
+        text = text.strip()
+
+        if filename.endswith(".py"):
+            m = _FIRST_PY_LINE_RE.search(text)
+            if m and m.start() > 0:
+                text = text[m.start():]
+
+        return text + "\n"
 
     def _write(self, project_dir: Path, filename: str, content: str, task: Task) -> None:
         path = project_dir / filename
