@@ -1,0 +1,23 @@
+Build a blog REST API.
+
+Requirements:
+- FastAPI
+- SQLite
+- Post model: id, title (string), slug (string, unique), content (text), published (bool, default false), created_at (datetime), updated_at (datetime)
+- Author model: id, name (string), email (string, unique), bio (string, optional)
+- Comment model: id, post_id (foreign key), author_name (string), body (text), created_at (datetime)
+- Tag model: id, name (string, unique)
+- Post-Tag association (many-to-many)
+- POST /authors — create an author
+- GET /authors — list all authors
+- GET /authors/{id} — get author with their posts
+- POST /posts — create a post (requires author_id, list of tag names)
+- GET /posts — list published posts, filterable by tag and author_id
+- GET /posts/{slug} — get a single post with author, tags, and comments
+- PUT /posts/{slug} — update a post
+- POST /posts/{slug}/publish — publish a post
+- DELETE /posts/{slug} — delete a post
+- POST /posts/{slug}/comments — add a comment to a post
+- GET /tags — list all tags
+- requirements.txt
+- README.md

@@ -1,0 +1,19 @@
+Build a task/todo list REST API.
+
+Requirements:
+- FastAPI
+- SQLite
+- Task model: id, title (string), description (string), status (enum: pending/in_progress/done), priority (int 1-5), due_date (date, optional)
+- Tag model: id, name (unique)
+- Task-Tag association (many-to-many)
+- POST /tasks — create a task
+- GET /tasks — list tasks, filterable by status and priority
+- GET /tasks/{id} — get a single task with its tags
+- PUT /tasks/{id} — update a task
+- DELETE /tasks/{id} — delete a task
+- POST /tasks/{id}/tags/{tag_id} — attach a tag to a task
+- DELETE /tasks/{id}/tags/{tag_id} — detach a tag from a task
+- POST /tags — create a tag
+- GET /tags — list all tags
+- requirements.txt
+- README.md
