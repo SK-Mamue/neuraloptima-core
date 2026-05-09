@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import difflib
 import re
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from core.llm import ask_claude, compute_cost
 from core.logger import Logger
 from core.models import Session
+from core.tool_registry import registry
 from tools.filesystem import read_file, write_file
 
 
@@ -44,27 +44,16 @@ class ProjectValidator:
         failed: set[Path] = set()
 
         # 1) syntax check
-        r = subprocess.run(
-            ["python", "-m", "compileall", str(self.project_dir)],
-            capture_output=True,
-            text=True,
-        )
-        if r.returncode != 0:
-            out = r.stdout + r.stderr
-            errors.append(f"compileall failed:\n{out.strip()}")
-            failed.update(self._find_files(out))
+        r = registry.run("python_compile", extra_args=[str(self.project_dir)])
+        if not r.success:
+            errors.append(f"compileall failed:\n{r.output.strip()}")
+            failed.update(self._find_files(r.output))
 
         # 2) import check (cwd = project dir so relative imports resolve)
-        r = subprocess.run(
-            ["python", "-c", "from main import app; print('import ok')"],
-            capture_output=True,
-            text=True,
-            cwd=str(self.project_dir),
-        )
-        if r.returncode != 0:
-            out = r.stdout + r.stderr
-            errors.append(f"import check failed:\n{out.strip()}")
-            failed.update(self._find_files(out))
+        r = registry.run("app_import_check", cwd=str(self.project_dir))
+        if not r.success:
+            errors.append(f"import check failed:\n{r.output.strip()}")
+            failed.update(self._find_files(r.output))
 
         if errors:
             self.logger.warning(
