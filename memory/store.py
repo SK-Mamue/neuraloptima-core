@@ -30,3 +30,16 @@ def load_session(session_id: str) -> Session:
         data = json.load(f)
 
     return Session.model_validate(data)
+
+
+def load_all_sessions() -> list[Session]:
+    sessions = []
+    for path in sorted(MEMORY_DIR.glob("*.json")):
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            sessions.append(Session.model_validate(data))
+        except Exception:
+            continue
+    sessions.sort(key=lambda s: s.started_at or "", reverse=True)
+    return sessions
