@@ -1,0 +1,22 @@
+Build an inventory management REST API.
+
+Requirements:
+- FastAPI
+- SQLite
+- Product model: id, sku (string, unique), name (string), description (string, optional), price (float), stock_quantity (int)
+- Supplier model: id, name (string), contact_email (string, unique), phone (string, optional)
+- StockMovement model: id, product_id (foreign key), movement_type (enum: restock/sale/adjustment), quantity (int), note (string, optional), created_at (datetime)
+- Product-Supplier association (many-to-many)
+- POST /products — create a product
+- GET /products — list products, filterable by low stock (quantity below threshold)
+- GET /products/{sku} — get a product with its suppliers and recent stock movements
+- PUT /products/{sku} — update product details
+- DELETE /products/{sku} — delete a product
+- POST /products/{sku}/restock — add stock (creates a StockMovement)
+- POST /products/{sku}/sell — reduce stock (creates a StockMovement, reject if insufficient)
+- POST /suppliers — create a supplier
+- GET /suppliers — list all suppliers
+- GET /suppliers/{id} — get supplier with their products
+- POST /suppliers/{id}/products/{sku} — link a supplier to a product
+- requirements.txt
+- README.md

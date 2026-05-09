@@ -31,6 +31,10 @@ _FILENAME_MAP = [
     (["readme", "documentation"], "README.md"),
     (["requirements", "dependencies"], "requirements.txt"),
     (["gitignore"], ".gitignore"),
+    # "Create project structure" → generate .gitignore (useful artifact, always missing).
+    # Must come after "requirements" so "Create project structure and requirements.txt"
+    # still lands on requirements.txt.
+    (["structure", "scaffold", "layout"], ".gitignore"),
     (["schema", "pydantic"], "schemas.py"),
     (["database", "sqlite", "db", "initialization"], "database.py"),
     (["model", "sqlalchemy"], "models.py"),

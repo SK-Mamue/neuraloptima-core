@@ -52,6 +52,15 @@ class TestFilenameMapper:
     def test_unknown_returns_none(self):
         assert _agent()._resolve_filename(_task("Do something unknown")) is None
 
+    def test_structure_maps_to_gitignore(self):
+        assert _agent()._resolve_filename(_task("Create project structure")) == ".gitignore"
+
+    def test_structure_with_requirements_maps_to_requirements(self):
+        # "requirements" must win over "structure" because it comes first in _FILENAME_MAP
+        assert _agent()._resolve_filename(
+            _task("Create project structure and requirements.txt")
+        ) == "requirements.txt"
+
     # ── explicit .py filename literal in title ────────────────────────────
 
     def test_explicit_crud_py(self):
