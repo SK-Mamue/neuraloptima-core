@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from agents.developer import DeveloperAgent
-from core.models import ProjectBrief, Session, Task
+from core.models import OutputType, ProjectBrief, Session, Task
 
 
 class Orchestrator:
@@ -14,23 +14,41 @@ class Orchestrator:
             self.agent.run_task(task)
 
         self.session.complete()
+
         return self.session
 
     @classmethod
     def bootstrap_demo_session(cls) -> "Orchestrator":
         brief = ProjectBrief(
-            title="Demo Project",
-            description="Simple orchestration test",
-            project_dir="./projects/demo-project",
+            title="FastAPI Todo API",
+            description="Simple FastAPI API with SQLite backend",
+            output_type=OutputType.API,
+            tech_stack=["fastapi", "sqlite"],
+            requirements=[
+                "Create FastAPI app",
+                "Create requirements.txt",
+                "Create README.md",
+            ],
+            project_dir="./projects/fastapi-todo-api",
         )
 
         session = Session(brief=brief)
 
-        session.tasks.append(
-            Task(
-                title="Create initial project structure",
-                description="Bootstrap folders and files",
-            )
+        session.tasks.extend(
+            [
+                Task(
+                    title="Create README",
+                    description="Generate project README",
+                ),
+                Task(
+                    title="Create requirements.txt",
+                    description="Generate Python requirements file",
+                ),
+                Task(
+                    title="Create app.py",
+                    description="Generate FastAPI entrypoint",
+                ),
+            ]
         )
 
         return cls(session)
