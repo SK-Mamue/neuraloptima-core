@@ -16,8 +16,8 @@ client = Anthropic(
 
 def ask_claude(prompt: str, system: str = "You are a senior software engineer.") -> str:
     response = client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=2000,
+        model="claude-sonnet-4-6",
+        max_tokens=4096,
         system=system,
         messages=[
             {
