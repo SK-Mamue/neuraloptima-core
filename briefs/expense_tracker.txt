@@ -1,0 +1,17 @@
+Build a personal expense tracker REST API.
+
+Requirements:
+- FastAPI
+- SQLite
+- Expense model: id, amount (float), category (string), description (string), date (date)
+- Category model: id, name (unique)
+- POST /expenses — create an expense
+- GET /expenses — list all expenses, filterable by category and date range (start_date, end_date)
+- GET /expenses/{id} — get a single expense
+- PUT /expenses/{id} — update an expense
+- DELETE /expenses/{id} — delete an expense
+- GET /expenses/summary — total spent per category
+- POST /categories — create a category
+- GET /categories — list all categories
+- requirements.txt
+- README.md

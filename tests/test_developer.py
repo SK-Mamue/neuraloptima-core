@@ -21,6 +21,8 @@ def _task(title: str) -> Task:
 
 
 class TestFilenameMapper:
+    # ── static map (flat files) ───────────────────────────────────────────
+
     def test_utils_utility(self):
         assert _agent()._resolve_filename(_task("Create short code utility")) == "utils.py"
 
@@ -33,25 +35,56 @@ class TestFilenameMapper:
     def test_utils_helpers(self):
         assert _agent()._resolve_filename(_task("Create helpers")) == "utils.py"
 
-    def test_utils_does_not_clobber_main(self):
-        # "utility function endpoint" — utility wins because it appears first in the map
-        # but a plain "Create FastAPI application" should still go to main.py
-        assert _agent()._resolve_filename(_task("Create FastAPI application")) == "main.py"
-
     def test_database(self):
         assert _agent()._resolve_filename(_task("Create database configuration")) == "database.py"
 
     def test_schemas(self):
         assert _agent()._resolve_filename(_task("Create Pydantic schemas")) == "schemas.py"
 
-    def test_crud(self):
-        assert _agent()._resolve_filename(_task("Create CRUD operations")) == "crud.py"
-
     def test_readme(self):
         assert _agent()._resolve_filename(_task("Create README.md")) == "README.md"
 
+    def test_main_wins_over_structural(self):
+        # static map must win: "application" → main.py, even though "routes" is
+        # also in the title and would otherwise trigger the routers/ subdir path
+        assert _agent()._resolve_filename(_task("Create FastAPI application and routes")) == "main.py"
+
     def test_unknown_returns_none(self):
         assert _agent()._resolve_filename(_task("Do something unknown")) is None
+
+    # ── structural detection — no domain → flat fallback ─────────────────
+
+    def test_crud_no_domain(self):
+        assert _agent()._resolve_filename(_task("Create CRUD operations")) == "crud.py"
+
+    def test_repository_no_domain(self):
+        assert _agent()._resolve_filename(_task("Create repository layer")) == "crud.py"
+
+    # ── structural detection — with domain → subdirectory ─────────────────
+
+    def test_crud_categories(self):
+        assert _agent()._resolve_filename(_task("Create categories CRUD operations")) == "crud/categories.py"
+
+    def test_crud_expenses(self):
+        assert _agent()._resolve_filename(_task("Create expenses CRUD operations")) == "crud/expenses.py"
+
+    def test_crud_items(self):
+        assert _agent()._resolve_filename(_task("Create items CRUD operations")) == "crud/items.py"
+
+    def test_router_categories(self):
+        assert _agent()._resolve_filename(_task("Create categories router")) == "routers/categories.py"
+
+    def test_router_expenses(self):
+        assert _agent()._resolve_filename(_task("Create expenses router")) == "routers/expenses.py"
+
+    def test_router_users(self):
+        assert _agent()._resolve_filename(_task("Create users router")) == "routers/users.py"
+
+    def test_routes_categories(self):
+        assert _agent()._resolve_filename(_task("Create categories routes")) == "routers/categories.py"
+
+    def test_repository_users(self):
+        assert _agent()._resolve_filename(_task("Create users repository")) == "crud/users.py"
 
 
 # ── fence stripping (existing behaviour, regression guard) ─────────────────

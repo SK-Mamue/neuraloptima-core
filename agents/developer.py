@@ -18,7 +18,10 @@ Return ONLY the raw file content — no markdown fences, no explanation, no comm
 The output will be written directly to a file.
 """
 
-# (keywords, output filename) — matched against task TITLE only, first match wins
+# Static map — checked first; first match wins.
+# "crud" and "repository" are intentionally absent: they are handled by
+# _SUBDIR_MAP so that "Create categories CRUD" → crud/categories.py instead
+# of always overwriting the same crud.py.
 _FILENAME_MAP = [
     (["readme", "documentation"], "README.md"),
     (["requirements", "dependencies"], "requirements.txt"),
@@ -27,12 +30,35 @@ _FILENAME_MAP = [
     (["database", "sqlite", "db", "initialization"], "database.py"),
     (["model", "sqlalchemy"], "models.py"),
     (["utility", "utilities", "helper", "helpers", "util"], "utils.py"),
-    # main.py before crud.py: titles like "Build FastAPI app with CRUD endpoints" must
-    # land in main.py, not crud.py. "error"/"exception" cross-cutting tasks also go here.
+    # main.py before the structural check: "Build FastAPI app with CRUD endpoints"
+    # must land in main.py, not crud/. "error"/"exception" tasks also go here.
     (["main", "fastapi", "endpoint", "application", "error", "exception"], "main.py"),
-    (["crud", "repository", "data access"], "crud.py"),
+    (["data access"], "crud.py"),   # multi-word fallback kept here
     (["test", "testing", "validation"], "TESTING.md"),
 ]
+
+# Structural keywords → subdirectory name.
+# When a title word matches a key, the remaining non-stop words become the
+# filename: "Create expenses CRUD operations" → crud/expenses.py
+_SUBDIR_MAP: dict[str, str] = {
+    "crud":         "crud",
+    "repository":   "crud",
+    "repositories": "crud",
+    "router":       "routers",
+    "routers":      "routers",
+    "route":        "routers",
+    "routes":       "routers",
+}
+
+# Words discarded when extracting the domain component from a task title
+_TITLE_STOP_WORDS: frozenset[str] = frozenset({
+    "create", "add", "implement", "build", "define", "generate", "write", "set", "setup",
+    "and", "the", "a", "an", "for", "with", "of", "to", "in", "on",
+    "crud", "repository", "repositories", "router", "routers", "route", "routes",
+    "operations", "operation", "functions", "function", "module",
+    "handler", "handlers", "endpoints", "endpoint",
+    "configuration", "config", "class", "classes", "layer", "service", "services",
+})
 
 # Files worth injecting as context so Claude understands the project shape
 _CONTEXT_FILES = ["requirements.txt", "schemas.py", "database.py", "models.py", "utils.py", "crud.py", "main.py"]
@@ -131,9 +157,23 @@ class DeveloperAgent:
 
     def _resolve_filename(self, task: Task) -> str | None:
         title = task.title.lower()
+
+        # 1) Static map — flat files always take priority
         for keywords, filename in _FILENAME_MAP:
             if any(kw in title for kw in keywords):
                 return filename
+
+        # 2) Structural keyword detection for subdirectory layout
+        words = re.sub(r"[^a-z0-9\s]", " ", title).split()
+        for word in words:
+            subdir = _SUBDIR_MAP.get(word)
+            if subdir is None:
+                continue
+            domain_words = [w for w in words if w not in _TITLE_STOP_WORDS]
+            if domain_words:
+                return f"{subdir}/{'_'.join(domain_words)}.py"
+            return f"{subdir}.py"  # no domain → flat canonical name
+
         return None
 
     def _build_prompt(self, task: Task, filename: str, project_dir: Path) -> str:
@@ -173,6 +213,7 @@ class DeveloperAgent:
     def _collect_context(self, project_dir: Path, current_file: str) -> dict[str, str]:
         """Read already-generated sibling files so Claude has full project context."""
         context: dict[str, str] = {}
+
         for fname in _CONTEXT_FILES:
             if fname == current_file:
                 continue
@@ -182,6 +223,22 @@ class DeveloperAgent:
                     context[fname] = read_file(str(path))
                 except Exception:
                     pass
+
+        for subdir in ("crud", "routers"):
+            subpath = project_dir / subdir
+            if not subpath.is_dir():
+                continue
+            for p in sorted(subpath.glob("*.py")):
+                if p.name == "__init__.py":
+                    continue
+                fname = f"{subdir}/{p.name}"
+                if fname == current_file:
+                    continue
+                try:
+                    context[fname] = read_file(str(p))
+                except Exception:
+                    pass
+
         return context
 
     def _extract_code(self, raw: str, filename: str = "") -> str:
@@ -204,6 +261,11 @@ class DeveloperAgent:
 
     def _write(self, project_dir: Path, filename: str, content: str, task: Task) -> None:
         path = project_dir / filename
+        if path.parent != project_dir:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            init = path.parent / "__init__.py"
+            if not init.exists():
+                init.write_text("", encoding="utf-8")
         write_file(str(path), content)
         task.files_created.append(str(path))
         task.result_summary = f"{filename} generated via LLM."
