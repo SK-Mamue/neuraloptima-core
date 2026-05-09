@@ -1,0 +1,8 @@
+Build a simple FastAPI todo API.
+
+Requirements:
+- FastAPI
+- SQLite
+- CRUD endpoints
+- requirements.txt
+- README.md

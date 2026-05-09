@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from agents.developer import DeveloperAgent
 from core.models import OutputType, ProjectBrief, Session, Task
 
@@ -18,18 +20,27 @@ class Orchestrator:
         return self.session
 
     @classmethod
-    def bootstrap_demo_session(cls) -> "Orchestrator":
+    def from_brief_file(cls, path: str) -> "Orchestrator":
+        brief_text = Path(path).read_text(encoding="utf-8")
+
+        title = "Generated Project"
+
+        first_line = brief_text.strip().splitlines()[0]
+
+        if first_line:
+            title = first_line.replace("Build", "").strip().title()
+
         brief = ProjectBrief(
-            title="FastAPI Todo API",
-            description="Simple FastAPI API with SQLite backend",
+            title=title,
+            description=brief_text,
             output_type=OutputType.API,
             tech_stack=["fastapi", "sqlite"],
             requirements=[
-                "Create FastAPI app",
-                "Create requirements.txt",
                 "Create README.md",
+                "Create requirements.txt",
+                "Create app.py",
             ],
-            project_dir="./projects/fastapi-todo-api",
+            project_dir="./projects/generated-project",
         )
 
         session = Session(brief=brief)
@@ -42,11 +53,11 @@ class Orchestrator:
                 ),
                 Task(
                     title="Create requirements.txt",
-                    description="Generate Python requirements file",
+                    description="Generate requirements",
                 ),
                 Task(
                     title="Create app.py",
-                    description="Generate FastAPI entrypoint",
+                    description="Generate FastAPI app",
                 ),
             ]
         )

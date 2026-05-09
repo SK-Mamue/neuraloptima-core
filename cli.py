@@ -11,8 +11,8 @@ app = typer.Typer()
 
 
 @app.command()
-def demo():
-    orchestrator = Orchestrator.bootstrap_demo_session()
+def run(brief: str) -> None:
+    orchestrator = Orchestrator.from_brief_file(brief)
 
     result = orchestrator.run()
 
