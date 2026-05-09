@@ -34,6 +34,16 @@ def run(brief: str) -> None:
     print(f"[green]Report:  [/green] {report_path}")
     print(f"[green]Manifest:[/green] {manifest_path}")
 
+    rv = result.review_result
+    if rv is not None and rv.severity == "severe":
+        print(f"\n[bold red]REVIEW: SEVERE issues detected — aborting.[/bold red]")
+        print(f"[red]{rv.summary}[/red]")
+        for issue in rv.bugs_found:
+            print(f"[red]  Bug: {issue}[/red]")
+        for issue in rv.security_issues:
+            print(f"[red]  Security: {issue}[/red]")
+        raise typer.Exit(code=1)
+
 
 @app.command(name="list")
 def list_sessions(n: int = typer.Option(20, "--limit", "-n", help="Max sessions to show")) -> None:
