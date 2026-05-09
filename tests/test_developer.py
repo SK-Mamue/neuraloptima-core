@@ -87,6 +87,83 @@ class TestFilenameMapper:
         assert _agent()._resolve_filename(_task("Create users repository")) == "crud/users.py"
 
 
+# ── _build_file_tree ───────────────────────────────────────────────────────
+
+class TestBuildFileTree:
+    def test_empty_dir(self, tmp_path):
+        assert _agent()._build_file_tree(tmp_path) == ""
+
+    def test_flat_files_listed(self, tmp_path):
+        (tmp_path / "main.py").write_text("")
+        (tmp_path / "database.py").write_text("")
+        tree = _agent()._build_file_tree(tmp_path)
+        assert "main.py" in tree
+        assert "database.py" in tree
+
+    def test_subdir_files_listed(self, tmp_path):
+        (tmp_path / "crud").mkdir()
+        (tmp_path / "crud" / "categories.py").write_text("")
+        tree = _agent()._build_file_tree(tmp_path)
+        assert "crud/categories.py" in tree or "crud\\categories.py" in tree
+
+    def test_pycache_excluded(self, tmp_path):
+        (tmp_path / "__pycache__").mkdir()
+        (tmp_path / "__pycache__" / "main.cpython-312.pyc").write_text("")
+        tree = _agent()._build_file_tree(tmp_path)
+        assert "__pycache__" not in tree
+
+    def test_non_code_files_excluded(self, tmp_path):
+        (tmp_path / "todos.db").write_text("")
+        (tmp_path / "main.py").write_text("")
+        tree = _agent()._build_file_tree(tmp_path)
+        assert "todos.db" not in tree
+        assert "main.py" in tree
+
+
+# ── _build_prompt layout rules ─────────────────────────────────────────────
+
+class TestBuildPromptLayoutRules:
+    def _prompt(self, title: str = "Create main app", filename: str = "main.py",
+                project_dir=None) -> str:
+        from pathlib import Path
+        import tempfile
+        project_dir = project_dir or Path(tempfile.mkdtemp())
+        agent = _agent()
+        task = Task(title=title, description="build it", status=TaskStatus.PENDING)
+        return agent._build_prompt(task, filename, project_dir)
+
+    def test_no_app_prefix_rule_present(self):
+        prompt = self._prompt()
+        assert "app/" not in prompt.split("IMPORT RULES")[0]  # not before the rules section
+        assert "NO 'app/' package" in prompt or "no 'app/' package" in prompt.lower()
+
+    def test_import_examples_present(self):
+        prompt = self._prompt()
+        assert "from database import" in prompt
+        assert "from crud.categories import" in prompt
+        assert "from routers.categories import" in prompt
+
+    def test_target_filename_in_prompt(self):
+        prompt = self._prompt(filename="routers/expenses.py")
+        assert "routers/expenses.py" in prompt
+
+    def test_file_tree_included_when_files_exist(self, tmp_path):
+        (tmp_path / "database.py").write_text("")
+        (tmp_path / "schemas.py").write_text("")
+        prompt = self._prompt(project_dir=tmp_path)
+        assert "database.py" in prompt
+        assert "schemas.py" in prompt
+
+    def test_file_tree_absent_when_empty(self, tmp_path):
+        prompt = self._prompt(project_dir=tmp_path)
+        assert "Current project file tree" not in prompt
+
+    def test_app_prefix_ignore_instruction_present(self):
+        prompt = self._prompt()
+        assert "app/" in prompt  # the rule *mentions* app/ to tell Claude to avoid it
+        assert "ignore the 'app/' prefix" in prompt
+
+
 # ── fence stripping (existing behaviour, regression guard) ─────────────────
 
 class TestFenceStripping:

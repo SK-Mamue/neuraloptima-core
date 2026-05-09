@@ -179,6 +179,7 @@ class DeveloperAgent:
     def _build_prompt(self, task: Task, filename: str, project_dir: Path) -> str:
         brief = self.session.brief
         context = self._collect_context(project_dir, filename)
+        file_tree = self._build_file_tree(project_dir)
 
         parts = [
             f"Project: {brief.title}",
@@ -200,14 +201,39 @@ class DeveloperAgent:
         except KeyError:
             pass  # unknown agent — no extra context injected
 
-        parts.append(f"Generate the file: {filename}")
+        parts += [
+            f"Generate the file: {filename}",
+            "",
+            "IMPORT RULES — you MUST follow these exactly:",
+            "  - This project uses a flat layout. The project root IS the Python path.",
+            "  - There is NO 'app/' package. Never write 'from app.X' or 'import app.X'.",
+            "  - Derive every import from the actual file path shown in the tree below:",
+            "      database.py            →  from database import ...",
+            "      models.py              →  from models import ...",
+            "      schemas.py             →  from schemas import ...",
+            "      crud/categories.py     →  from crud.categories import ...",
+            "      crud/expenses.py       →  from crud.expenses import ...",
+            "      routers/categories.py  →  from routers.categories import ...",
+            "      routers/expenses.py    →  from routers.expenses import ...",
+            "  - Subdirectories are Python packages (empty __init__.py already present).",
+            "  - If the task description mentions 'app/X.py', ignore the 'app/' prefix;",
+            "    the actual file is X.py at the project root.",
+            "",
+        ]
+
+        if file_tree:
+            parts += [
+                "Current project file tree (derive all imports from this):",
+                file_tree,
+                "",
+            ]
 
         if context:
-            parts.append("\nExisting project files for context:\n")
+            parts.append("Existing project files for context:\n")
             for fname, content in context.items():
                 parts.append(f"--- {fname} ---\n{content}\n")
 
-        parts.append("\nReturn ONLY the raw file content. No markdown fences, no explanation.")
+        parts.append("Return ONLY the raw file content. No markdown fences, no explanation.")
         return "\n".join(parts)
 
     def _collect_context(self, project_dir: Path, current_file: str) -> dict[str, str]:
@@ -240,6 +266,18 @@ class DeveloperAgent:
                     pass
 
         return context
+
+    def _build_file_tree(self, project_dir: Path) -> str:
+        """Return a compact listing of project files, skipping noise dirs."""
+        _SKIP = {"__pycache__", ".git", ".venv"}
+        _EXTS = {".py", ".txt", ".md", ".env", ".cfg", ".toml", ".ini"}
+        lines: list[str] = []
+        for p in sorted(project_dir.rglob("*")):
+            if any(part in _SKIP for part in p.relative_to(project_dir).parts):
+                continue
+            if p.is_file() and p.suffix in _EXTS:
+                lines.append(f"  {p.relative_to(project_dir)}")
+        return "\n".join(lines)
 
     def _extract_code(self, raw: str, filename: str = "") -> str:
         """Strip markdown fences; for .py files also remove any leading prose text."""
