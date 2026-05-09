@@ -152,6 +152,26 @@ def show(session_id: str) -> None:
 
     console.print(table)
 
+    # ── Review summary ───────────────────────────────────────────────────
+    rv = session.review_result
+    if rv is not None:
+        _SEV_COLOR = {"ok": "green", "warning": "yellow", "severe": "red"}
+        _SEV_ICON  = {"ok": "✅", "warning": "⚠️", "severe": "❌"}
+        color = _SEV_COLOR.get(rv.severity, "white")
+        icon  = _SEV_ICON.get(rv.severity, "?")
+        rev_text = Text()
+        rev_text.append(f"{icon} {rv.severity.upper()}", style=f"bold {color}")
+        rev_text.append(f"  {rv.summary}\n", style="dim")
+        if rv.bugs_found:
+            rev_text.append(f"Bugs: {len(rv.bugs_found)}  ", style="red")
+        if rv.security_issues:
+            rev_text.append(f"Security: {len(rv.security_issues)}  ", style="red")
+        if rv.missing_files:
+            rev_text.append(f"Missing: {', '.join(rv.missing_files)}  ", style="yellow")
+        if rv.production_notes:
+            rev_text.append(f"Prod notes: {len(rv.production_notes)}", style="dim")
+        console.print(Panel(rev_text, title="[bold]Review[/bold]", expand=False))
+
     # ── Report path ─────────────────────────────────────────────────────
     rp = report_path(session.id)
     if rp.exists():

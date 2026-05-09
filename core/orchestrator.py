@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from agents.developer import DeveloperAgent
+from agents.reviewer import ReviewAgent
 from core.agent_registry import assign_agent
 from core.logger import Logger
 from core.models import OutputType, ProjectBrief, Session, Task
@@ -92,6 +93,7 @@ class Orchestrator:
             self.agent.run_task(task)
 
         self._validate_and_repair()
+        self._run_review()
 
         self._print_timing_summary()
         self._print_cost_summary()
@@ -125,9 +127,31 @@ class Orchestrator:
         if val_dur is not None:
             print(f"  {'Validation + repair':<{W}} {val_dur:>6.1f}s")
 
-        grand_total = task_total + (val_dur or 0.0)
+        rev_dur = self.session.review_result.duration_seconds if self.session.review_result else None
+        if rev_dur is not None:
+            print(f"  {'Review':<{W}} {rev_dur:>6.1f}s")
+
+        grand_total = task_total + (val_dur or 0.0) + (rev_dur or 0.0)
         print(f"  {'─' * (W + 9)}")
         print(f"  {'Total':<{W}} {grand_total:>6.1f}s")
+        print()
+
+    def _run_review(self) -> None:
+        print("=== REVIEW ===")
+        reviewer = ReviewAgent(self.session)
+        result = reviewer.review()
+
+        _SEV = {"ok": "✅", "warning": "⚠️", "severe": "❌"}
+        print(f"  {_SEV.get(result.severity, '?')} [{result.severity.upper()}] {result.summary}")
+
+        if result.bugs_found:
+            print(f"  Bugs        : {len(result.bugs_found)}")
+        if result.security_issues:
+            print(f"  Security    : {len(result.security_issues)} issue(s)")
+        if result.missing_files:
+            print(f"  Missing     : {', '.join(result.missing_files)}")
+        if result.production_notes:
+            print(f"  Prod notes  : {len(result.production_notes)}")
         print()
 
     def _validate_and_repair(self) -> None:

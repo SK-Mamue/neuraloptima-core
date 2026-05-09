@@ -75,6 +75,18 @@ class LogEntry(BaseModel):
     detail: str
 
 
+class ReviewResult(BaseModel):
+    architecture_notes: list[str] = Field(default_factory=list)
+    bugs_found: list[str] = Field(default_factory=list)
+    missing_files: list[str] = Field(default_factory=list)
+    security_issues: list[str] = Field(default_factory=list)
+    production_notes: list[str] = Field(default_factory=list)
+    severity: str = "ok"  # "ok" | "warning" | "severe"
+    summary: str = ""
+    tokens_used: dict[str, int] = Field(default_factory=dict)
+    duration_seconds: float | None = None
+
+
 class Session(BaseModel):
     id: str = Field(default_factory=lambda: new_id("session"))
     brief: ProjectBrief
@@ -86,6 +98,7 @@ class Session(BaseModel):
     completed_at: datetime | None = None
     total_cost_usd: float = 0.0
     validation_duration_seconds: float | None = None
+    review_result: ReviewResult | None = None
 
     def add_log(self, event: str, detail: str, level: str = "info", task_id: str | None = None) -> None:
         self.log.append(LogEntry(level=level, task_id=task_id, event=event, detail=detail))

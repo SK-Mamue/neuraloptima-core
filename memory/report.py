@@ -106,6 +106,11 @@ def _render(session: Session) -> str:
     # ── Validation ──────────────────────────────────────────────────
     L += ["## Validation", "", _validation_outcome(session), "", "---", ""]
 
+    # ── Review ──────────────────────────────────────────────────────
+    L += ["## Review", ""]
+    L += _review_section(session)
+    L += ["", "---", ""]
+
     # ── Cost ────────────────────────────────────────────────────────
     L += [
         "## Cost",
@@ -137,6 +142,33 @@ def _render(session: Session) -> str:
     L.append("")
 
     return "\n".join(L)
+
+
+def _review_section(session: Session) -> list[str]:
+    r = session.review_result
+    if r is None:
+        return ["*(not run)*"]
+
+    _SEV = {"ok": "✅", "warning": "⚠️", "severe": "❌"}
+    lines: list[str] = [
+        f"**Severity:** {_SEV.get(r.severity, '?')} {r.severity.upper()}  ",
+        f"**Summary:** {r.summary}",
+        "",
+    ]
+
+    def _bullets(heading: str, items: list[str]) -> None:
+        if items:
+            lines.append(f"**{heading}**")
+            lines.extend(f"- {item}" for item in items)
+            lines.append("")
+
+    _bullets("Architecture notes", r.architecture_notes)
+    _bullets("Bugs found", r.bugs_found)
+    _bullets("Missing files", r.missing_files)
+    _bullets("Security issues", r.security_issues)
+    _bullets("Production notes", r.production_notes)
+
+    return lines
 
 
 def _validation_outcome(session: Session) -> str:
