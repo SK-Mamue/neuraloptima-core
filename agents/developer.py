@@ -163,6 +163,13 @@ class DeveloperAgent:
     def _resolve_filename(self, task: Task) -> str | None:
         title = task.title.lower()
 
+        # 0) Explicit filename literal in the title: "Implement crud.py" → "crud.py"
+        #    Catches titles where the LLM names the file directly, before the
+        #    structural detector splits the dot away and misreads "py" as a domain.
+        m = re.search(r'\b([a-z_][a-z0-9_]*)\.py\b', title)
+        if m:
+            return m.group(1) + ".py"
+
         # 1) Static map — flat files always take priority
         for keywords, filename in _FILENAME_MAP:
             if any(kw in title for kw in keywords):

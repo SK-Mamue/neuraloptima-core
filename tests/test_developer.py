@@ -52,6 +52,17 @@ class TestFilenameMapper:
     def test_unknown_returns_none(self):
         assert _agent()._resolve_filename(_task("Do something unknown")) is None
 
+    # ── explicit .py filename literal in title ────────────────────────────
+
+    def test_explicit_crud_py(self):
+        assert _agent()._resolve_filename(_task("Implement crud.py")) == "crud.py"
+
+    def test_explicit_database_py(self):
+        assert _agent()._resolve_filename(_task("Implement database.py")) == "database.py"
+
+    def test_explicit_utils_py(self):
+        assert _agent()._resolve_filename(_task("Implement utils.py")) == "utils.py"
+
     # ── structural detection — no domain → flat fallback ─────────────────
 
     def test_crud_no_domain(self):
