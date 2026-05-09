@@ -160,6 +160,16 @@ class ProjectValidator:
 # Helpers (module-level, no state)
 # ------------------------------------------------------------------ #
 
+# Matches the first line that looks like valid Python — used to drop leading
+# prose the repair LLM may emit before the actual code.
+_FIRST_PY_LINE_RE = re.compile(
+    r"^(from |import |#|class |def |\"\"\"|\'\'\'"
+    r"|__[a-z_]"
+    r"|[A-Z_]{2,} *=)",
+    re.MULTILINE,
+)
+
+
 def _strip_fences(raw: str) -> str:
     text = raw.strip()
     for fence in ("```python", "```txt", "```"):
@@ -168,7 +178,11 @@ def _strip_fences(raw: str) -> str:
             break
     if text.endswith("```"):
         text = text[:-3]
-    return text.strip() + "\n"
+    text = text.strip()
+    m = _FIRST_PY_LINE_RE.search(text)
+    if m and m.start() > 0:
+        text = text[m.start():]
+    return text + "\n"
 
 
 def _unified_diff(before: str, after: str, filename: str) -> str:
