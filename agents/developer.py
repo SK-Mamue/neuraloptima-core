@@ -4,6 +4,7 @@ import time
 import traceback
 from pathlib import Path
 
+from core.agent_registry import registry as agent_registry
 from core.llm import ask_claude, compute_cost
 from core.logger import Logger
 from core.models import Session, Task, TaskStatus, utc_now
@@ -43,7 +44,8 @@ class DeveloperAgent:
     def run_task(self, task: Task) -> Task:
         task.status = TaskStatus.RUNNING
         task.started_at = utc_now()
-        self.logger.info(event="task_started", detail=task.title)
+        self.logger.info(event="task_started", detail=task.title,
+                         extra={"assigned_agent": task.assigned_agent})
 
         project_dir = ensure_dir(self.session.brief.project_dir)
         filename = self._resolve_filename(task)
@@ -135,8 +137,20 @@ class DeveloperAgent:
             f"Task: {task.title}",
             f"Details: {task.description}",
             "",
-            f"Generate the file: {filename}",
         ]
+
+        try:
+            spec = agent_registry.get(task.assigned_agent)
+            parts += [
+                f"You are acting as: {spec.role}",
+                f"Your focus: {spec.description}",
+                f"Your capabilities: {', '.join(spec.capabilities)}",
+                "",
+            ]
+        except KeyError:
+            pass  # unknown agent — no extra context injected
+
+        parts.append(f"Generate the file: {filename}")
 
         if context:
             parts.append("\nExisting project files for context:\n")

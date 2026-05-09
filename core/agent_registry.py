@@ -72,6 +72,13 @@ class AgentRegistry:
 registry = AgentRegistry()
 
 registry.register(AgentSpec(
+    name="architect",
+    role="Database & Schema Architect",
+    description="Designs data models, database configurations, and Pydantic schemas for the project.",
+    capabilities=["database_design", "schema_modeling", "orm_setup", "migration_planning"],
+))
+
+registry.register(AgentSpec(
     name="planner",
     role="Task Planner",
     description="Breaks a project brief into an ordered list of concrete tasks.",
