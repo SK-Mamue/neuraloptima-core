@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ast
 import difflib
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -59,6 +61,14 @@ class ProjectValidator:
         if not r.success:
             errors.append(f"import check failed:\n{r.output.strip()}")
             failed.update(self._find_files(r.output))
+
+        # 4) duplicate enum check — deterministic; no LLM call needed
+        for msg in self._check_duplicate_enums():
+            errors.append(msg)
+            # schemas.py is the file to repair (it should import, not redefine)
+            schemas = self.project_dir / "schemas.py"
+            if schemas.exists():
+                failed.add(schemas)
 
         if errors:
             self.logger.warning(
@@ -144,6 +154,28 @@ class ProjectValidator:
         else:
             self.logger.warning(event="repair_no_change", detail=target.name)
 
+    def _check_duplicate_enums(self) -> list[str]:
+        """Return one error string per enum class name defined in more than one file."""
+        _SKIP = {"__pycache__", ".venv", ".git"}
+        locations: dict[str, list[str]] = defaultdict(list)
+        for py_file in sorted(self.project_dir.rglob("*.py")):
+            rel = py_file.relative_to(self.project_dir)
+            if any(part in _SKIP for part in rel.parts):
+                continue
+            for name in _enum_class_names(py_file):
+                locations[name].append(str(rel))
+
+        errors = []
+        for name, files in sorted(locations.items()):
+            if len(files) > 1:
+                locs = ", ".join(files)
+                errors.append(
+                    f"Duplicate enum '{name}' defined in multiple files: {locs}. "
+                    f"Define it exactly once in models.py and import it everywhere else "
+                    f"(e.g. 'from models import {name}' in schemas.py)."
+                )
+        return errors
+
     def _collect_context(self, exclude: Path) -> dict[str, str]:
         context: dict[str, str] = {}
         for p in sorted(self.project_dir.glob("*.py")):
@@ -159,6 +191,31 @@ class ProjectValidator:
 # ------------------------------------------------------------------ #
 # Helpers (module-level, no state)
 # ------------------------------------------------------------------ #
+
+_ENUM_BASE_NAMES = frozenset({"Enum", "PyEnum", "IntEnum", "StrEnum", "Flag", "IntFlag"})
+
+
+def _enum_class_names(path: Path) -> list[str]:
+    """Return names of all classes that inherit from an Enum base in a .py file."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (SyntaxError, UnicodeDecodeError):
+        return []
+    names = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for base in node.bases:
+            # bare name: Enum, PyEnum, IntEnum …
+            if isinstance(base, ast.Name) and base.id in _ENUM_BASE_NAMES:
+                names.append(node.name)
+                break
+            # attribute: enum.Enum, enum.IntEnum …
+            if isinstance(base, ast.Attribute) and base.attr in _ENUM_BASE_NAMES:
+                names.append(node.name)
+                break
+    return names
+
 
 # Matches the first line that looks like valid Python — used to drop leading
 # prose the repair LLM may emit before the actual code.
