@@ -25,6 +25,14 @@ Rules:
 - Use exact title strings from earlier entries in the same array.
 - The first task always has an empty depends_on list.
 - Every file that imports from another generated file must depend on the task that creates it.
+
+FLAT LAYOUT — you MUST follow these rules in every task description:
+- The project uses a flat layout. The project root IS the Python path.
+- There is NO "app/" package and NO "app/" directory.
+- Never write "app/" in any file path: write "database.py", not "app/database.py".
+- Never write "app." in any import: write "from database import ...", not "from app.database import ...".
+- Subdirectories are routers/ and crud/ only (e.g. "routers/expenses.py", "crud/categories.py").
+- When referencing a file another task creates, use its bare path: "database.py", "schemas.py", "routers/expenses.py".
 """
 
 
