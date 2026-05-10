@@ -346,3 +346,24 @@ class TestDeveloperSystemPrompt:
     def test_no_circular_schema_references_rule(self):
         lower = SYSTEM_PROMPT.lower()
         assert "circular" in lower
+
+    def test_atomic_db_writes_rule(self):
+        lower = SYSTEM_PROMPT.lower()
+        assert "atomic" in lower or "one db.commit()" in lower or "single commit" in lower
+
+    def test_no_string_order_by_rule(self):
+        assert "order_by" in SYSTEM_PROMPT
+        lower = SYSTEM_PROMPT.lower()
+        assert "string literal" in lower or "string expression" in lower
+
+    def test_datetime_utcnow_deprecated_rule(self):
+        assert "utcnow" in SYSTEM_PROMPT
+        assert "timezone.utc" in SYSTEM_PROMPT
+
+    def test_no_aiosqlite_unless_async_rule(self):
+        lower = SYSTEM_PROMPT.lower()
+        assert "aiosqlite" in lower
+
+    def test_sku_immutable_rule(self):
+        lower = SYSTEM_PROMPT.lower()
+        assert "immutable" in lower or "sku" in lower

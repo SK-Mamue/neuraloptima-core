@@ -38,6 +38,24 @@ API QUALITY RULES — every violation causes a severe review failure:
   Never invent module paths that do not correspond to a real generated file.
 - Avoid circular Pydantic schema references. If two schemas reference each other,
   use a string forward reference or call model_rebuild() after both are defined.
+- Multi-step DB writes in one endpoint must be atomic: perform all model changes
+  first, then call db.commit() exactly once, then db.refresh() if needed. Never
+  commit between two related writes (e.g. updating stock_quantity then inserting
+  a StockMovement) — split commits leave the database inconsistent if the second
+  write fails.
+- Never use a string literal for SQLAlchemy relationship order_by. String
+  expressions like order_by='Model.col.desc()' are silently ignored or raise
+  errors at runtime. Use a real column expression imported from the model, or
+  omit order_by and sort in the query instead.
+- Never use datetime.utcnow(). It is deprecated in Python 3.12 and returns a
+  naive datetime. Use datetime.now(timezone.utc) and import timezone from the
+  datetime module.
+- Do not add aiosqlite to requirements unless the project uses async SQLAlchemy
+  (AsyncSession / create_async_engine). A synchronous SQLAlchemy engine never
+  needs aiosqlite.
+- SKU (and any other natural-key identifier specified in the brief) must be
+  immutable after creation. Do not include sku in Update schemas (e.g.
+  ProductUpdate) unless the brief explicitly allows SKU changes.
 """
 
 # Static map — checked first; first match wins.
