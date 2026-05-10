@@ -61,7 +61,7 @@ class TestFilenameMapper:
             _task("Create project structure and requirements.txt")
         ) == "requirements.txt"
 
-    # ── explicit .py filename literal in title ────────────────────────────
+    # ── explicit .py path in title (flat and subdirectory) ───────────────
 
     def test_explicit_crud_py(self):
         assert _agent()._resolve_filename(_task("Implement crud.py")) == "crud.py"
@@ -71,6 +71,22 @@ class TestFilenameMapper:
 
     def test_explicit_utils_py(self):
         assert _agent()._resolve_filename(_task("Implement utils.py")) == "utils.py"
+
+    def test_explicit_crud_subdir_path(self):
+        # "Create crud/products.py" must preserve the subdirectory prefix.
+        assert _agent()._resolve_filename(_task("Create crud/products.py")) == "crud/products.py"
+
+    def test_explicit_routers_subdir_path(self):
+        assert _agent()._resolve_filename(_task("Create routers/products.py")) == "routers/products.py"
+
+    def test_explicit_flat_basename(self):
+        assert _agent()._resolve_filename(_task("Implement products.py")) == "products.py"
+
+    def test_traversal_path_not_returned(self):
+        # "../evil.py" cannot produce a traversal path — the ".." is outside the
+        # character class so only the safe basename "evil" is captured, if at all.
+        result = _agent()._resolve_filename(_task("../evil.py"))
+        assert result is None or ".." not in result
 
     # ── structural detection — no domain → flat fallback ─────────────────
 

@@ -184,10 +184,11 @@ class DeveloperAgent:
     def _resolve_filename(self, task: Task) -> str | None:
         title = task.title.lower()
 
-        # 0) Explicit filename literal in the title: "Implement crud.py" → "crud.py"
-        #    Catches titles where the LLM names the file directly, before the
-        #    structural detector splits the dot away and misreads "py" as a domain.
-        m = re.search(r'\b([a-z_][a-z0-9_]*)\.py\b', title)
+        # 0) Explicit .py path in the title: "Create crud/products.py" → "crud/products.py"
+        #    Supports a flat basename ("products.py") or a single subdirectory prefix
+        #    ("crud/products.py", "routers/products.py"). The character class restricts
+        #    path components to [a-z0-9_], so ".." and absolute paths can never match.
+        m = re.search(r'([a-z][a-z0-9_]*(?:/[a-z][a-z0-9_]*)*)\.py\b', title)
         if m:
             return m.group(1) + ".py"
 
