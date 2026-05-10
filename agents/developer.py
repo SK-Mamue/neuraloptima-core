@@ -106,6 +106,22 @@ SEMANTIC DOMAIN RULES — business-logic correctness:
   (import func from sqlalchemy) to delegate the default to the database engine.
   datetime.now(timezone.utc) still applies to application-level datetime values
   created in route handlers or CRUD functions — only column defaults are affected.
+
+PYDANTIC V2 RULES — always use the v2 API; v1 patterns cause runtime warnings or failures:
+- Use model_config = ConfigDict(from_attributes=True) on every ORM-backed response
+  schema. Never write 'class Config: orm_mode = True' — that is the Pydantic v1
+  pattern and is ignored or raises a warning under Pydantic v2.
+- Never call .dict() on a Pydantic model instance. Use .model_dump() (v2 API).
+  Never call Model.from_orm(obj) — use Model.model_validate(obj) instead.
+  Never call parse_obj() or parse_raw() — use model_validate() instead.
+- For enum fields that must serialise as their plain value (not the enum object),
+  add use_enum_values=True to the ConfigDict: ConfigDict(from_attributes=True,
+  use_enum_values=True). Without this, a MovementType.RESTOCK field serialises as
+  the enum object, not the string 'RESTOCK', breaking JSON responses.
+- Always import ConfigDict from pydantic at the top of the file alongside BaseModel
+  and Field: from pydantic import BaseModel, ConfigDict, Field
+- Never mix v1 and v2 patterns in the same file. Pick v2 and apply it consistently
+  to every model in the file.
 """
 
 # Static map — checked first; first match wins.

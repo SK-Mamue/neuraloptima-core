@@ -172,6 +172,14 @@ class TestBuildPrompt:
         assert "truncated" in prompt
         assert "cannot verify" in prompt
 
+    def test_pydantic_v1_v2_consistency_instruction_in_prompt(self):
+        session = _make_session()
+        agent = ReviewAgent(session)
+        prompt = agent._build_prompt({"main.py": "x = 1"})
+        assert "orm_mode" in prompt
+        assert "from_attributes" in prompt
+        assert "model_dump" in prompt
+
 
 # ── review() integration (mocked LLM) ────────────────────────────────────
 

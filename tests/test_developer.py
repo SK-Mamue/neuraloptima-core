@@ -414,3 +414,22 @@ class TestDeveloperSystemPrompt:
         assert "sqlite" in lower
         assert "server_default" in SYSTEM_PROMPT
         assert "func.now()" in SYSTEM_PROMPT
+
+    def test_pydantic_v2_no_class_config_rule(self):
+        assert "orm_mode" in SYSTEM_PROMPT
+        assert "class Config" in SYSTEM_PROMPT
+
+    def test_pydantic_v2_configdict_from_attributes_rule(self):
+        assert "ConfigDict" in SYSTEM_PROMPT
+        assert "from_attributes=True" in SYSTEM_PROMPT
+
+    def test_pydantic_v2_model_dump_not_dict_rule(self):
+        assert "model_dump()" in SYSTEM_PROMPT
+        assert ".dict()" in SYSTEM_PROMPT
+
+    def test_pydantic_v2_model_validate_not_from_orm_rule(self):
+        assert "model_validate" in SYSTEM_PROMPT
+        assert "from_orm" in SYSTEM_PROMPT
+
+    def test_pydantic_v2_use_enum_values_rule(self):
+        assert "use_enum_values" in SYSTEM_PROMPT
