@@ -76,6 +76,36 @@ API QUALITY RULES — every violation causes a severe review failure:
 - Remove every unused import before returning the file. An import is unused if
   nothing in the file references it. Common offenders: field_validator, List,
   Optional, Tuple when the typing module equivalents are not used.
+
+SEMANTIC DOMAIN RULES — business-logic correctness:
+- Quantity, count, and stock fields must use Field(ge=0) in Pydantic schemas to
+  reject negative values at validation time. Price, cost, amount, and rate fields
+  must use Field(gt=0). Percentage or ratio fields must use Field(ge=0, le=100).
+  Apply these constraints in both Create and Update schemas — never accept a
+  negative quantity or a zero-or-negative price.
+- If the project uses a movement or history table (e.g. StockMovement, AuditLog)
+  to record changes to a derived field (e.g. stock_quantity), do not include that
+  derived field in the Update schema. All mutations must flow through the dedicated
+  movement/history endpoint. Allowing a direct stock_quantity update alongside a
+  StockMovement system bypasses the audit trail and makes history data unreliable.
+- Never set dynamic attributes on SQLAlchemy ORM instances to pass extra data to
+  the response serialiser (e.g. product.recent_movements = [...] or obj.extra = x).
+  ORM instances lose dynamically-set attributes when SQLAlchemy expires or refreshes
+  them. Instead, construct the Pydantic response model explicitly from the data you
+  already hold in memory: ResponseSchema(field=db_obj.field, extra=extra_results).
+- For every SQLAlchemy relationship() where deleting the parent should remove its
+  children, add cascade="all, delete-orphan" to the relationship. For SQLite,
+  add 'PRAGMA foreign_keys=ON' via an engine event or after_connect hook — SQLite
+  does not enforce foreign keys by default. DELETE routes must never return a 500
+  due to FK constraint violations; handle them with HTTPException(409) or rely on
+  ORM cascade="all, delete-orphan".
+- For SQLite backends (sqlite in the connection string), do not use
+  datetime.now(timezone.utc) as a SQLAlchemy column default (default= or onupdate=).
+  SQLite stores datetimes as naive strings and strips timezone info on write, causing
+  aware/naive comparison errors at query time. Use server_default=func.now()
+  (import func from sqlalchemy) to delegate the default to the database engine.
+  datetime.now(timezone.utc) still applies to application-level datetime values
+  created in route handlers or CRUD functions — only column defaults are affected.
 """
 
 # Static map — checked first; first match wins.

@@ -388,3 +388,29 @@ class TestDeveloperSystemPrompt:
     def test_no_unused_imports_rule(self):
         lower = SYSTEM_PROMPT.lower()
         assert "unused import" in lower
+
+    def test_quantity_field_ge_rule(self):
+        assert "ge=0" in SYSTEM_PROMPT
+
+    def test_price_field_gt_rule(self):
+        assert "gt=0" in SYSTEM_PROMPT
+
+    def test_audit_trail_no_direct_update_rule(self):
+        lower = SYSTEM_PROMPT.lower()
+        assert "audit" in lower
+        assert "movement" in lower or "derived" in lower
+
+    def test_no_orm_dynamic_attribute_rule(self):
+        lower = SYSTEM_PROMPT.lower()
+        assert "dynamic" in lower
+        assert "refresh" in lower or "expires" in lower or "expire" in lower
+
+    def test_cascade_delete_rule(self):
+        assert "cascade" in SYSTEM_PROMPT
+        assert "delete-orphan" in SYSTEM_PROMPT
+
+    def test_sqlite_server_default_datetime_rule(self):
+        lower = SYSTEM_PROMPT.lower()
+        assert "sqlite" in lower
+        assert "server_default" in SYSTEM_PROMPT
+        assert "func.now()" in SYSTEM_PROMPT
