@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from agents.developer import DeveloperAgent
+from agents.developer import SYSTEM_PROMPT, DeveloperAgent
 from core.models import OutputType, ProjectBrief, Session, Task, TaskStatus
 
 
@@ -290,3 +290,37 @@ class TestProseStripping:
         raw = "This file has no Python in it at all."
         result = _agent()._extract_code(raw, "main.py")
         assert "no Python" in result
+
+
+# ── SYSTEM_PROMPT quality rules ────────────────────────────────────────────
+
+class TestDeveloperSystemPrompt:
+    def test_no_bare_return_rule(self):
+        assert "bare 'return'" in SYSTEM_PROMPT
+
+    def test_raise_http_exception_rule(self):
+        assert "HTTPException" in SYSTEM_PROMPT
+
+    def test_route_paths_match_brief_rule(self):
+        assert "brief" in SYSTEM_PROMPT and "sku" in SYSTEM_PROMPT.lower()
+
+    def test_static_before_parameterised_routes_rule(self):
+        # Must mention ordering static routes before parameterised ones
+        assert "/summary" in SYSTEM_PROMPT or "static route" in SYSTEM_PROMPT.lower()
+        assert "/{" in SYSTEM_PROMPT
+
+    def test_no_duplicate_routes_rule(self):
+        lower = SYSTEM_PROMPT.lower()
+        assert "same" in lower and ("path" in lower or "method" in lower)
+
+    def test_no_undocumented_features_rule(self):
+        lower = SYSTEM_PROMPT.lower()
+        assert "draft" in lower or "unpublished" in lower
+
+    def test_imports_match_real_files_rule(self):
+        lower = SYSTEM_PROMPT.lower()
+        assert "import" in lower and "file tree" in lower
+
+    def test_no_circular_schema_references_rule(self):
+        lower = SYSTEM_PROMPT.lower()
+        assert "circular" in lower

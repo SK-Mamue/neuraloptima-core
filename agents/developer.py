@@ -21,6 +21,23 @@ PYTHON RULES — violations cause runtime errors and are never acceptable:
 - Never shadow a type with a same-named field. If a Pydantic model needs a field
   called 'date', alias the import: `from datetime import date as Date` and annotate
   the field as `date: Date`. The same applies to 'id', 'type', 'list', 'dict', etc.
+
+API QUALITY RULES — every violation causes a severe review failure:
+- Never write a bare 'return' in a route handler. Every handler must explicitly
+  return a response object, a Pydantic model instance, or raise an HTTPException.
+- Raise HTTPException with the correct status code when a resource is not found
+  (404) or an operation is invalid (400/409/422). Never return None silently.
+- Route paths must match the project brief exactly. If the brief names a path
+  parameter 'sku', use /{sku} — never substitute 'id' or 'product_id'.
+- Register static routes (e.g. /summary, /count, /me) before parameterised routes
+  (e.g. /{id}, /{sku}) in the same router so FastAPI resolves them correctly.
+- Never define the same HTTP method + path pattern more than once in a router.
+- Only implement features the brief explicitly requests. Do not add draft/
+  unpublished filtering, soft-delete flags, or visibility controls unless stated.
+- Derive every import from the actual file tree provided in the task prompt.
+  Never invent module paths that do not correspond to a real generated file.
+- Avoid circular Pydantic schema references. If two schemas reference each other,
+  use a string forward reference or call model_rebuild() after both are defined.
 """
 
 # Static map — checked first; first match wins.
