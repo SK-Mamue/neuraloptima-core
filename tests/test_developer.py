@@ -446,3 +446,16 @@ class TestDeveloperSystemPrompt:
         lower = SYSTEM_PROMPT.lower()
         assert "check constraint" in lower or "check" in lower
         assert "sqlite" in lower
+
+    def test_enum_single_source_defined_once_rule(self):
+        assert "exactly once" in SYSTEM_PROMPT
+
+    def test_enum_single_source_models_wins_rule(self):
+        lower = SYSTEM_PROMPT.lower()
+        assert "models.py" in lower
+        assert "import" in lower
+        assert "redefine" in lower or "never redefine" in lower or "not redefine" in lower
+
+    def test_enum_single_source_no_copy_paste_rule(self):
+        lower = SYSTEM_PROMPT.lower()
+        assert "copy" in lower or "copy-paste" in lower or "duplicate" in lower

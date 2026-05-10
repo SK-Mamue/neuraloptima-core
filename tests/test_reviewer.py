@@ -188,6 +188,14 @@ class TestBuildPrompt:
         assert "String" in prompt
         assert "CHECK" in prompt or "check" in prompt.lower()
 
+    def test_enum_single_source_instruction_in_prompt(self):
+        session = _make_session()
+        agent = ReviewAgent(session)
+        prompt = agent._build_prompt({"main.py": "x = 1"})
+        assert "single" in prompt.lower() or "once" in prompt.lower()
+        assert "models.py" in prompt
+        assert "import" in prompt
+
 
 # ── review() integration (mocked LLM) ────────────────────────────────────
 

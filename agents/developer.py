@@ -142,6 +142,24 @@ DB ENUM ENFORCEMENT RULES — schema-layer validation is not enough:
 - For SQLite: SQLAlchemy's Enum type generates a VARCHAR column with a CHECK
   constraint on SQLite (it does not use a native ENUM type). This is correct and
   provides DB-level enforcement; no special handling is needed for SQLite.
+
+ENUM SINGLE-SOURCE-OF-TRUTH RULES — one definition, imported everywhere:
+- Every enum class must be defined exactly once. Define it in models.py (alongside
+  the SQLAlchemy model that uses it). schemas.py, routers.py, and crud.py must import
+  it from models, not redefine it. Example:
+    models.py:  class MovementType(str, PyEnum): RESTOCK = "restock"; SELL = "sell"
+    schemas.py: from models import MovementType  # never redefine here
+- Never copy-paste an enum class into a second file, even if the values are currently
+  identical. Two independent copies with matching values today will diverge as the
+  codebase evolves, causing the DB column and the API schema to enforce different
+  value sets without any immediate error.
+- The SQLAlchemy Column(Enum(MovementType)) and the Pydantic schema field typed as
+  MovementType must reference the exact same imported class object. If models.py and
+  schemas.py each define their own MovementType, they are different classes and
+  Column(Enum(models.MovementType)) does not enforce the same set as schemas.MovementType.
+- Do not spread enum variants across multiple files or modules. If an enum is needed
+  in both models.py and schemas.py, models.py wins as the single source; schemas.py
+  imports from models.
 """
 
 # Static map — checked first; first match wins.
