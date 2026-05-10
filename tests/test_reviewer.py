@@ -180,6 +180,14 @@ class TestBuildPrompt:
         assert "from_attributes" in prompt
         assert "model_dump" in prompt
 
+    def test_db_enum_enforcement_instruction_in_prompt(self):
+        session = _make_session()
+        agent = ReviewAgent(session)
+        prompt = agent._build_prompt({"main.py": "x = 1"})
+        assert "Enum" in prompt
+        assert "String" in prompt
+        assert "CHECK" in prompt or "check" in prompt.lower()
+
 
 # ── review() integration (mocked LLM) ────────────────────────────────────
 

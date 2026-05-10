@@ -433,3 +433,16 @@ class TestDeveloperSystemPrompt:
 
     def test_pydantic_v2_use_enum_values_rule(self):
         assert "use_enum_values" in SYSTEM_PROMPT
+
+    def test_db_enum_column_type_rule(self):
+        assert "Column(Enum(" in SYSTEM_PROMPT
+        assert "Column(String)" in SYSTEM_PROMPT or "Column(String" in SYSTEM_PROMPT
+
+    def test_db_enum_single_definition_rule(self):
+        lower = SYSTEM_PROMPT.lower()
+        assert "one place" in lower or "never define the same enum twice" in lower or "shared" in lower
+
+    def test_db_enum_sqlite_check_constraint_rule(self):
+        lower = SYSTEM_PROMPT.lower()
+        assert "check constraint" in lower or "check" in lower
+        assert "sqlite" in lower

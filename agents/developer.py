@@ -122,6 +122,26 @@ PYDANTIC V2 RULES — always use the v2 API; v1 patterns cause runtime warnings 
   and Field: from pydantic import BaseModel, ConfigDict, Field
 - Never mix v1 and v2 patterns in the same file. Pick v2 and apply it consistently
   to every model in the file.
+
+DB ENUM ENFORCEMENT RULES — schema-layer validation is not enough:
+- When a SQLAlchemy model column stores a value from a fixed set (e.g. movement type,
+  status, category), use Column(Enum(MyEnum)) instead of Column(String). This adds a
+  CHECK constraint at the database level and prevents invalid values from being
+  persisted even if application-layer validation is bypassed.
+- Import the Python Enum class and pass it directly to SQLAlchemy's Enum type:
+    from enum import Enum as PyEnum
+    class MovementType(str, PyEnum):
+        RESTOCK = "restock"
+        SELL    = "sell"
+    movement_type = Column(Enum(MovementType), nullable=False)
+  Using str as the Enum base ensures values serialise as plain strings automatically.
+- Keep the enum definition in one place (models.py or a shared enums.py) and import
+  it into both the SQLAlchemy model and the Pydantic schema. Never define the same
+  enum twice with different member names or values — any mismatch between the Python
+  enum, the DB column type, and the Pydantic schema field is a data-integrity bug.
+- For SQLite: SQLAlchemy's Enum type generates a VARCHAR column with a CHECK
+  constraint on SQLite (it does not use a native ENUM type). This is correct and
+  provides DB-level enforcement; no special handling is needed for SQLite.
 """
 
 # Static map — checked first; first match wins.
