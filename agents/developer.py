@@ -184,13 +184,20 @@ class DeveloperAgent:
     def _resolve_filename(self, task: Task) -> str | None:
         title = task.title.lower()
 
-        # 0) Explicit .py path in the title: "Create crud/products.py" → "crud/products.py"
-        #    Supports a flat basename ("products.py") or a single subdirectory prefix
-        #    ("crud/products.py", "routers/products.py"). The character class restricts
-        #    path components to [a-z0-9_], so ".." and absolute paths can never match.
-        m = re.search(r'([a-z][a-z0-9_]*(?:/[a-z][a-z0-9_]*)*)\.py\b', title)
+        # 0) Explicit .py path in the raw title (raw preserves casing for the path).
+        #    Allows letters (any case), digits, underscores, hyphens, and forward
+        #    slashes so paths like "crud/products.py" and "api-routes/items.py" work.
+        #    Safety: if ".." appears anywhere in the text before the regex match, the
+        #    match is a suffix of a traversal expression (e.g. "../evil.py") and must
+        #    be rejected.  Backslashes and ".." inside the captured path are also
+        #    rejected.  Absolute paths cannot match because "/" is only allowed as an
+        #    interior separator between two non-empty word components.
+        m = re.search(r'([A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*)\.py\b', task.title)
         if m:
-            return m.group(1) + ".py"
+            prefix = task.title[: m.start()]
+            path = m.group(1) + ".py"
+            if ".." not in prefix and ".." not in path and "\\" not in path:
+                return path
 
         # 1) Static map — flat files always take priority.
         #    Uses whole-word matching so plurals like "endpoints" don't trigger "endpoint".

@@ -82,11 +82,17 @@ class TestFilenameMapper:
     def test_explicit_flat_basename(self):
         assert _agent()._resolve_filename(_task("Implement products.py")) == "products.py"
 
-    def test_traversal_path_not_returned(self):
-        # "../evil.py" cannot produce a traversal path — the ".." is outside the
-        # character class so only the safe basename "evil" is captured, if at all.
-        result = _agent()._resolve_filename(_task("../evil.py"))
-        assert result is None or ".." not in result
+    def test_traversal_path_returns_none(self):
+        # "../evil.py" — the regex matches "evil" at position 3, but the text
+        # before the match ("../") contains "..", so the whole match is rejected
+        # and the function must return None (not "evil.py").
+        assert _agent()._resolve_filename(_task("../evil.py")) is None
+
+    def test_explicit_hyphenated_subdir_path(self):
+        # Hyphens are valid in directory and file names.
+        assert _agent()._resolve_filename(
+            _task("Create api-routes/products.py")
+        ) == "api-routes/products.py"
 
     # ── structural detection — no domain → flat fallback ─────────────────
 
