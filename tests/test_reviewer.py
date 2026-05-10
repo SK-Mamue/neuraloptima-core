@@ -165,6 +165,13 @@ class TestBuildPrompt:
         prompt = agent._build_prompt({"main.py": "app = None"})
         assert "ground truth" not in prompt
 
+    def test_truncation_note_in_prompt(self):
+        session = _make_session()
+        agent = ReviewAgent(session)
+        prompt = agent._build_prompt({"main.py": "x = 1"})
+        assert "truncated" in prompt
+        assert "cannot verify" in prompt
+
 
 # ── review() integration (mocked LLM) ────────────────────────────────────
 

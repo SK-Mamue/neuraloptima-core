@@ -16,7 +16,7 @@ Return ONLY valid JSON — no markdown fences, no explanation.
 
 _REVIEW_FILES = ["requirements.txt", "schemas.py", "database.py", "models.py", "utils.py", "crud.py", "main.py", "README.md"]
 _REVIEW_SUBDIRS = ("crud", "routers")
-_MAX_FILE_CHARS = 3_000  # per-file cap to stay under rate limits
+_MAX_FILE_CHARS = 6_000  # per-file cap to stay under rate limits
 
 
 class ReviewAgent:
@@ -137,6 +137,11 @@ class ReviewAgent:
             parts.append(f"--- {fname} ---\n{content}\n")
 
         parts += [
+            "NOTE: Some files may end with '... [truncated — N chars total]'. This means",
+            "the file content was cut off due to length limits. Do NOT report bugs, missing",
+            "logic, or 'cannot verify' findings based solely on content that was not shown.",
+            "Only report issues that are clearly visible in the provided excerpt.",
+            "",
             "Return a JSON object with these exact fields:",
             '  "architecture_notes": [strings — architecture observations]',
             '  "bugs_found": [strings — obvious bugs or logic errors]',
