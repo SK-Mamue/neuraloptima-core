@@ -106,6 +106,20 @@ class TestFilenameMapper:
     def test_repository_users(self):
         assert _agent()._resolve_filename(_task("Create users repository")) == "crud/users.py"
 
+    def test_endpoints_plural_does_not_map_to_main(self):
+        # "endpoints" (plural) must NOT match the singular "endpoint" keyword in _FILENAME_MAP.
+        # With both "crud" and "router" in the title, "router" (last match) wins → routers/.
+        # Domain words are drawn from before "crud" (first subdir keyword): ["product"].
+        assert _agent()._resolve_filename(
+            _task("Implement product CRUD and stock endpoints router")
+        ) == "routers/product.py"
+
+    def test_endpoint_singular_still_maps_to_main(self):
+        # "endpoint" as a standalone word still triggers the main.py static entry.
+        assert _agent()._resolve_filename(
+            _task("Create main application endpoint")
+        ) == "main.py"
+
 
 # ── _build_file_tree ───────────────────────────────────────────────────────
 

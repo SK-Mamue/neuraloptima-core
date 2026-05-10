@@ -174,18 +174,28 @@ class DeveloperAgent:
         if m:
             return m.group(1) + ".py"
 
-        # 1) Static map — flat files always take priority
+        # 1) Static map — flat files always take priority.
+        #    Uses whole-word matching so plurals like "endpoints" don't trigger "endpoint".
         for keywords, filename in _FILENAME_MAP:
-            if any(kw in title for kw in keywords):
+            if any(re.search(r"\b" + re.escape(kw) + r"\b", title) for kw in keywords):
                 return filename
 
-        # 2) Structural keyword detection for subdirectory layout
+        # 2) Structural keyword detection for subdirectory layout.
+        #    Last match wins so "router" beats "crud" when both appear in the title
+        #    (e.g. "Implement product CRUD and stock endpoints router" → routers/).
+        #    Domain words are extracted from before the *first* subdir keyword to avoid
+        #    collecting unrelated nouns that appear after it.
         words = re.sub(r"[^a-z0-9\s]", " ", title).split()
-        for word in words:
-            subdir = _SUBDIR_MAP.get(word)
-            if subdir is None:
-                continue
-            domain_words = [w for w in words if w not in _TITLE_STOP_WORDS]
+        subdir: str | None = None
+        first_subdir_idx = -1
+        for i, word in enumerate(words):
+            candidate = _SUBDIR_MAP.get(word)
+            if candidate is not None:
+                if subdir is None:
+                    first_subdir_idx = i
+                subdir = candidate  # last match wins
+        if subdir is not None:
+            domain_words = [w for w in words[:first_subdir_idx] if w not in _TITLE_STOP_WORDS]
             if domain_words:
                 return f"{subdir}/{'_'.join(domain_words)}.py"
             return f"{subdir}.py"  # no domain → flat canonical name
