@@ -56,6 +56,26 @@ API QUALITY RULES — every violation causes a severe review failure:
 - SKU (and any other natural-key identifier specified in the brief) must be
   immutable after creation. Do not include sku in Update schemas (e.g.
   ProductUpdate) unless the brief explicitly allows SKU changes.
+- Wrap db.commit() for unique-resource creation in try/except IntegrityError.
+  On IntegrityError: call db.rollback(), then raise HTTPException(status_code=409,
+  detail="...already exists"). Never let a SQLAlchemy IntegrityError propagate as
+  an unhandled 500. Import IntegrityError from sqlalchemy.exc.
+- Declare Pydantic schemas in dependency order: a schema that references another
+  schema (e.g. via a List[OtherSchema] field) must be declared AFTER the schema
+  it references. Only use string forward references (e.g. List['OtherSchema'])
+  when a true mutual reference makes ordering impossible. Call model_rebuild()
+  only when unavoidable, and always place the call after ALL schemas are defined.
+- Only add enum values that have a corresponding route or are explicitly required
+  by the brief. Do not add enum variants "for completeness" — unused enum values
+  that have no route are a dead-code bug. If the brief lists specific movement
+  types, add exactly those and no others.
+- If a SQLAlchemy column already has a server-side or Python-side default (e.g.
+  default=datetime.now(timezone.utc)), do not also set that field manually in
+  CRUD functions. Redundant manual assignments shadow the column default and
+  create inconsistency if the default changes.
+- Remove every unused import before returning the file. An import is unused if
+  nothing in the file references it. Common offenders: field_validator, List,
+  Optional, Tuple when the typing module equivalents are not used.
 """
 
 # Static map — checked first; first match wins.

@@ -367,3 +367,24 @@ class TestDeveloperSystemPrompt:
     def test_sku_immutable_rule(self):
         lower = SYSTEM_PROMPT.lower()
         assert "immutable" in lower or "sku" in lower
+
+    def test_integrity_error_handling_rule(self):
+        assert "IntegrityError" in SYSTEM_PROMPT
+        assert "409" in SYSTEM_PROMPT
+        assert "rollback" in SYSTEM_PROMPT.lower()
+
+    def test_schema_dependency_order_rule(self):
+        lower = SYSTEM_PROMPT.lower()
+        assert "dependency order" in lower or "declared after" in lower
+
+    def test_no_dead_enum_variants_rule(self):
+        lower = SYSTEM_PROMPT.lower()
+        assert "enum" in lower and ("unused" in lower or "no route" in lower or "dead" in lower)
+
+    def test_no_redundant_column_default_override_rule(self):
+        lower = SYSTEM_PROMPT.lower()
+        assert "default" in lower and ("redundant" in lower or "manual" in lower or "do not also set" in lower)
+
+    def test_no_unused_imports_rule(self):
+        lower = SYSTEM_PROMPT.lower()
+        assert "unused import" in lower
