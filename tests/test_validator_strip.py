@@ -4,7 +4,14 @@ from pathlib import Path
 
 import textwrap
 
-from core.validator import _enum_class_names, _enum_members, _references_member_in_files, _strip_fences
+from core.validator import (
+    _enum_class_names,
+    _enum_members,
+    _field_numeric_constraint,
+    _has_numeric_guard,
+    _references_member_in_files,
+    _strip_fences,
+)
 
 
 class TestStripFences:
@@ -391,3 +398,293 @@ class TestCheckDeadEnumVariants:
         # pycache files ignored — RESTOCK is still dead (no other .py files)
         errors = v._check_dead_enum_variants()
         assert any("RESTOCK" in e for e in errors)
+
+
+# ── _field_numeric_constraint ─────────────────────────────────────────────────
+
+import ast as _ast
+
+
+def _parse_assign(src: str) -> _ast.AnnAssign:
+    """Parse a single annotated assignment and return the AnnAssign node."""
+    tree = _ast.parse(src)
+    return tree.body[0]
+
+
+class TestFieldNumericConstraint:
+    def test_gt0_returns_gt(self):
+        node = _parse_assign("quantity: int = Field(gt=0)")
+        assert _field_numeric_constraint(node) == "gt"
+
+    def test_ge0_returns_ge(self):
+        node = _parse_assign("quantity: int = Field(ge=0)")
+        assert _field_numeric_constraint(node) == "ge"
+
+    def test_ge1_treated_as_gt(self):
+        # ge=1 is equivalent to gt=0 for integers
+        node = _parse_assign("quantity: int = Field(ge=1)")
+        assert _field_numeric_constraint(node) == "gt"
+
+    def test_no_field_returns_none(self):
+        node = _parse_assign("quantity: int")
+        assert _field_numeric_constraint(node) is None
+
+    def test_literal_default_returns_none(self):
+        node = _parse_assign("quantity: int = 0")
+        assert _field_numeric_constraint(node) is None
+
+    def test_field_no_numeric_kw_returns_none(self):
+        node = _parse_assign('quantity: int = Field(description="qty")')
+        assert _field_numeric_constraint(node) is None
+
+
+# ── _has_numeric_guard ────────────────────────────────────────────────────────
+
+def _parse_func(src: str) -> _ast.FunctionDef:
+    tree = _ast.parse(textwrap.dedent(src))
+    return tree.body[0]
+
+
+class TestHasNumericGuard:
+    def test_if_lte_zero_raise_passes(self):
+        fn = _parse_func("""\
+            def f(quantity: int):
+                if quantity <= 0:
+                    raise ValueError("bad")
+        """)
+        assert _has_numeric_guard(fn, "quantity") is True
+
+    def test_if_lt_one_raise_passes(self):
+        fn = _parse_func("""\
+            def f(quantity: int):
+                if quantity < 1:
+                    raise ValueError("bad")
+        """)
+        assert _has_numeric_guard(fn, "quantity") is True
+
+    def test_assert_gt_zero_passes(self):
+        fn = _parse_func("""\
+            def f(quantity: int):
+                assert quantity > 0
+        """)
+        assert _has_numeric_guard(fn, "quantity") is True
+
+    def test_no_guard_fails(self):
+        fn = _parse_func("""\
+            def f(quantity: int):
+                x = quantity + 1
+        """)
+        assert _has_numeric_guard(fn, "quantity") is False
+
+    def test_guard_on_different_param_not_counted(self):
+        fn = _parse_func("""\
+            def f(quantity: int, price: float):
+                if price <= 0:
+                    raise ValueError("bad price")
+        """)
+        assert _has_numeric_guard(fn, "quantity") is False
+
+    def test_if_without_raise_not_counted(self):
+        fn = _parse_func("""\
+            def f(quantity: int):
+                if quantity <= 0:
+                    quantity = 1
+        """)
+        assert _has_numeric_guard(fn, "quantity") is False
+
+
+# ── _check_numeric_constraints ────────────────────────────────────────────────
+
+class TestCheckNumericConstraints:
+    def _make_validator(self, tmp_path: Path, files: dict[str, str]):
+        from core.logger import Logger
+        from core.models import OutputType, ProjectBrief, Session
+        from core.validator import ProjectValidator
+        for fname, content in files.items():
+            p = tmp_path / fname
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+        brief = ProjectBrief(
+            title="T", description="d", output_type=OutputType.API,
+            tech_stack=[], requirements=[], project_dir=str(tmp_path),
+        )
+        session = Session(brief=brief)
+        return ProjectValidator(tmp_path, session, Logger(session.id))
+
+    # ── Required test cases ──────────────────────────────────────────────────
+
+    def test_field_gt0_quantity_request_schema_passes(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "schemas.py": textwrap.dedent("""\
+                from pydantic import BaseModel, Field
+                class RestockRequest(BaseModel):
+                    quantity: int = Field(gt=0)
+            """),
+        })
+        msgs = [m for m, _ in v._check_numeric_constraints()]
+        assert not any("quantity" in m for m in msgs)
+
+    def test_field_ge0_quantity_request_schema_fails(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "schemas.py": textwrap.dedent("""\
+                from pydantic import BaseModel, Field
+                class RestockRequest(BaseModel):
+                    quantity: int = Field(ge=0)
+            """),
+        })
+        msgs = [m for m, _ in v._check_numeric_constraints()]
+        assert any("quantity" in m and "ge=0" in m for m in msgs)
+
+    def test_missing_field_on_amount_fails(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "schemas.py": textwrap.dedent("""\
+                from pydantic import BaseModel
+                class PaymentCreate(BaseModel):
+                    amount: float
+            """),
+        })
+        msgs = [m for m, _ in v._check_numeric_constraints()]
+        assert any("amount" in m for m in msgs)
+
+    def test_missing_field_on_price_fails(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "schemas.py": textwrap.dedent("""\
+                from pydantic import BaseModel
+                class ProductCreate(BaseModel):
+                    price: float
+            """),
+        })
+        msgs = [m for m, _ in v._check_numeric_constraints()]
+        assert any("price" in m for m in msgs)
+
+    def test_stock_quantity_ge0_passes(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "schemas.py": textwrap.dedent("""\
+                from pydantic import BaseModel, Field
+                class ProductCreate(BaseModel):
+                    stock_quantity: int = Field(ge=0)
+            """),
+        })
+        msgs = [m for m, _ in v._check_numeric_constraints()]
+        assert not any("stock_quantity" in m for m in msgs)
+
+    def test_internal_function_no_guard_fails(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "crud.py": textwrap.dedent("""\
+                def add_stock_movement(db, product_id, quantity: int):
+                    product.stock_quantity += quantity
+            """),
+        })
+        msgs = [m for m, _ in v._check_numeric_constraints()]
+        assert any("quantity" in m and "add_stock_movement" in m for m in msgs)
+
+    def test_internal_function_with_guard_passes(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "crud.py": textwrap.dedent("""\
+                def add_stock_movement(db, product_id, quantity: int):
+                    if quantity <= 0:
+                        raise ValueError("quantity must be positive")
+                    product.stock_quantity += quantity
+            """),
+        })
+        msgs = [m for m, _ in v._check_numeric_constraints()]
+        assert not any("add_stock_movement" in m for m in msgs)
+
+    # ── Additional edge cases ────────────────────────────────────────────────
+
+    def test_optional_quantity_field_skipped(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "schemas.py": textwrap.dedent("""\
+                from pydantic import BaseModel
+                from typing import Optional
+                class ProductUpdate(BaseModel):
+                    quantity: Optional[int] = None
+            """),
+        })
+        msgs = [m for m, _ in v._check_numeric_constraints()]
+        assert not any("quantity" in m for m in msgs)
+
+    def test_read_schema_skipped(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "schemas.py": textwrap.dedent("""\
+                from pydantic import BaseModel
+                class StockMovementRead(BaseModel):
+                    quantity: int
+            """),
+        })
+        msgs = [m for m, _ in v._check_numeric_constraints()]
+        assert not any("quantity" in m for m in msgs)
+
+    def test_route_handler_skipped(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "routers.py": textwrap.dedent("""\
+                async def restock(quantity: int):
+                    pass
+                restock.__wrapped__ = True
+            """),
+        })
+        # Not decorated with @router.post → will be flagged; decorate it to skip
+        v2 = self._make_validator(tmp_path, {
+            "routers.py": textwrap.dedent("""\
+                from fastapi import APIRouter
+                router = APIRouter()
+                @router.post("/restock")
+                async def restock(quantity: int):
+                    pass
+            """),
+        })
+        msgs2 = [m for m, _ in v2._check_numeric_constraints()]
+        assert not any("restock" in m for m in msgs2)
+
+    def test_error_message_contains_required_fields(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "schemas.py": textwrap.dedent("""\
+                from pydantic import BaseModel, Field
+                class SellRequest(BaseModel):
+                    quantity: int = Field(ge=0)
+            """),
+        })
+        pairs = v._check_numeric_constraints()
+        assert pairs
+        msg, path = pairs[0]
+        assert "schemas.py" in msg          # file path
+        assert "SellRequest" in msg         # class name
+        assert "quantity" in msg            # field name
+        assert "ge=0" in msg               # detected constraint
+        assert "gt=0" in msg               # expected constraint
+        assert "fix" in msg.lower()        # fix instruction
+        assert path.name == "schemas.py"   # correct file queued for repair
+
+    def test_stock_quantity_no_field_fails(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "schemas.py": textwrap.dedent("""\
+                from pydantic import BaseModel
+                class ProductCreate(BaseModel):
+                    stock_quantity: int
+            """),
+        })
+        msgs = [m for m, _ in v._check_numeric_constraints()]
+        assert any("stock_quantity" in m for m in msgs)
+
+    def test_price_gt0_passes(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "schemas.py": textwrap.dedent("""\
+                from pydantic import BaseModel, Field
+                class ProductCreate(BaseModel):
+                    price: float = Field(gt=0)
+            """),
+        })
+        msgs = [m for m, _ in v._check_numeric_constraints()]
+        assert not any("price" in m for m in msgs)
+
+    def test_crud_file_queued_for_repair(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "crud/products.py": textwrap.dedent("""\
+                def sell(db, quantity: int):
+                    pass
+            """),
+        })
+        pairs = v._check_numeric_constraints()
+        assert pairs
+        _, path = pairs[0]
+        assert "products.py" in path.name
