@@ -2,8 +2,8 @@
 
 **Date:** 2026-05-11  
 **Branch:** `master` — clean, in sync with `origin/master`  
-**Last commit:** `35be98a` Validate numeric constraint consistency  
-**Test suite:** 188 tests, all passing
+**Last commit:** `<pending>` Validate referential integrity  
+**Test suite:** 231 tests, all passing
 
 ---
 
@@ -36,6 +36,7 @@ Brief (txt) → Task planner (LLM) → DeveloperAgent (generates files)
 | `0b2f9a0` | **Deterministic duplicate enum validator** — `ProjectValidator.run()` gains a 4th check: `_check_duplicate_enums()` scans all generated `.py` files with the `ast` module, detects class names inheriting from any Enum base appearing in more than one file, and fails validation with a message naming the class, both files, and the required fix. Duplicate detection queues `schemas.py` for LLM repair; the repair receives `models.py` as context and replaces the duplicate class definition with `from models import EnumName`. Adds 9 new tests (5 for `_enum_class_names`, 4 for `_check_duplicate_enums`). |
 | `a277084` | **Deterministic dead enum variant validator** — `ProjectValidator.run()` gains a 5th check: `_check_dead_enum_variants()` scans all generated `.py` files with the `ast` module, collects each enum member (via new `_enum_members()` helper), then scans all other project files (via new `_references_member_in_files()` helper) for attribute access (`EnumClass.MEMBER`) or exact string constant (`"value"`) references. Members with zero external references are flagged as dead variants. Detection queues `models.py` for LLM repair so the unused member is removed. Adds 19 new tests (5 `TestEnumMembers`, 7 `TestReferencesMemberInFiles`, 7 `TestCheckDeadEnumVariants`). Verified on `inventory_api`: `MovementType.adjustment` detected and removed by repair; dead enum warning eliminated. |
 | `35be98a` | **Deterministic numeric constraint validator** — `ProjectValidator.run()` gains a 6th check: `_check_numeric_constraints()` scans all generated `.py` files for two violation classes. (1) Schema fields: `AnnAssign` nodes in non-read Pydantic classes are checked against field-category rules — `quantity`/`amount` must have `Field(gt=0)`; `stock_quantity`/`count`/`balance` accept `Field(ge=0)` or `Field(gt=0)`; `price`/`cost`/`rate`/`total`/`subtotal` must have `Field(gt=0)`. `Optional` fields and `PositiveInt`/`PositiveFloat` annotations are skipped. Read/Response/Out classes are skipped entirely. (2) Function parameters: module-level (non-route-handler) functions with a raw `quantity: int` or `amount: int` parameter are required to have a zero/negative guard (`if param <= 0: raise` or `assert param > 0`). Unlike previous checks, returns `(error_msg, Path)` pairs so the exact violating file is queued for repair. Adds 5 new helpers (`_field_numeric_constraint`, `_is_optional_annotation`, `_is_route_handler`, `_compare_involves`, `_has_numeric_guard`) and 26 new tests (6 `TestFieldNumericConstraint`, 6 `TestHasNumericGuard`, 14 `TestCheckNumericConstraints`). Verified on `inventory_api`: LLM generated correct constraints; validator stayed silent as expected safety net. |
+| `<pending>` | **Deterministic referential integrity validator** — `ProjectValidator.run()` gains an 8th check: `_check_referential_integrity()` scans all generated `.py` files using the `ast` module and detects four FK/referential integrity patterns. (1) ORM class fields ending in `_id` with `Column(Integer)` but no `ForeignKey(...)`. (2) ORM class fields whose names match an existing model class (e.g. `Expense.category = Column(String)` when `Category` exists) — semantically a reference but without a FK constraint. (3) `relationship("Target")` where the expected `target_id` FK column exists in the same class but has no `ForeignKey`, or is absent entirely. (4) Module-level association `Table(...)` with column names ending in `_id` but no `ForeignKey`. Returns `(error_msg, Path)` pairs for precise per-file repair targeting. Adds 4 new helpers (`_is_orm_model_class_base`, `_column_call_has_fk`, `_column_call_type`, `_relationship_target`) and 25 new tests (13 `TestReferentialHelpers`, 12 `TestCheckReferentialIntegrity`). **Benchmark findings:** `inventory_api` — no FK violations fired (LLM correctly generated FKs). `expense_tracker` — FK validator fired on `Expense.category = Column(String)` (Category model exists), repair fixed models.py to use `category_id` FK, but CRUD layer still referenced old field name, causing cross-file inconsistency and SEVERE reviewer severity. Known limitation: FK repair must queue models.py + crud/*.py + schemas.py together to propagate the rename correctly. |
 
 ---
 
@@ -66,16 +67,20 @@ Brief (txt) → Task planner (LLM) → DeveloperAgent (generates files)
 
 ---
 
-## Validation Pipeline (6 steps)
+## Validation Pipeline (8 steps)
 
 ```
-1. python_compile      — syntax check via compileall
-2. pip_install         — install requirements.txt so import check resolves deps
-3. app_import_check    — import all generated modules; catch missing deps / circular imports
-4. duplicate_enum      — ast scan for enum class names defined in more than one file (deterministic)
-5. dead_enum           — ast scan for enum members with no external references (deterministic)
-6. numeric_constraints — ast scan for missing or weak Field bounds and unguarded int parameters (deterministic)
-   → any failure → LLM repair → re-run all 6 steps
+1. python_compile           — syntax check via compileall
+2. pip_install              — install requirements.txt so import check resolves deps
+3. app_import_check         — import all generated modules; catch missing deps / circular imports
+4. duplicate_enum           — ast scan for enum class names defined in more than one file (deterministic)
+5. dead_enum_variant        — ast scan for enum members with no external references (deterministic)
+6. numeric_constraints      — ast scan for missing or weak Field bounds and unguarded int parameters (deterministic)
+7. audit_trail_bypass       — ast scan for audited fields in Update schemas or generic update funcs (deterministic)
+8. referential_integrity    — ast scan for FK/referential integrity violations:
+                              _id fields without ForeignKey, plain String fields referencing a model,
+                              relationship() with no FK column, association Table columns without FK
+   → any failure → LLM repair → re-run all 8 steps
 ```
 
 **Step 4** fires when any enum class (inheriting from `Enum`, `PyEnum`, `IntEnum`, `StrEnum`, `Flag`, `IntFlag`, or `enum.Enum`) appears under the same name in more than one file. `schemas.py` is queued for repair; the repair prompt provides `models.py` as context so Claude replaces the duplicate class with an import.
@@ -112,12 +117,14 @@ Brief (txt) → Task planner (LLM) → DeveloperAgent (generates files)
 
 - **Tests:** 188 passing, 0 failing
 - **`inventory_api` severity:** WARNING — dead enum `MovementType.adjustment` caught and removed by validator/repair; LLM generated correct `Field(gt=0)` constraints so numeric validator fired no violations; remaining issues are unrelated to numeric constraints or enum structure
-- **`expense_tracker` severity:** WARNING — 3 bugs; FK referential integrity, status code mismatch, minor code quality
+- **`expense_tracker` severity:** SEVERE (up from WARNING). Step 8 fired on `Expense.category = Column(String)` (Category model exists), repair changed models.py to use `category_id` FK, but CRUD layer still referenced old `category` field → cross-file inconsistency → SEVERE. This is a repair scope limitation (see Known Limitations), not a false positive.
+- **`inventory_api` severity:** WARNING. No FK violations fired (LLM correctly generated FKs for all inventory relations). Same remaining warnings as before: concurrency race, unhandled ValueError, datetime handling.
 - **Structural pipeline failures:** None.
 - **Framework API issues:** Eliminated (Pydantic v2 enforced; deprecated datetime patterns removed).
-- **Enum consistency:** Deterministic. Duplicate definitions and dead variants are caught by steps 4–5 and repaired before the reviewer runs.
+- **Enum consistency:** Deterministic. Duplicate definitions and dead variants are caught by steps 4–5.
 - **Numeric constraints:** Deterministic. Step 6 enforces `Field(gt=0)` / `Field(ge=0)` per field category and guards on internal helper parameters.
-- **Reviewer noise:** Eliminated. All reported findings are real code issues.
+- **Referential integrity:** Deterministic. Step 8 catches FK violations at model, association table, and relationship levels.
+- **Reviewer noise:** Eliminated for inventory domain. Expense domain currently SEVERE due to repair cross-file scope issue.
 
 ---
 
@@ -129,8 +136,8 @@ The sell and restock endpoints read stock quantity, check sufficiency, then writ
 ### Internal helpers without quantity guards
 Module-level CRUD helpers that accept raw `quantity: int` without a `if quantity <= 0: raise` guard can silently corrupt stock if called by internal paths that bypass the public API validation. Step 6 now flags these deterministically.
 
-### Missing FK/domain-level referential integrity
-`Expense.category` is a plain `String` with no `ForeignKey` to the `Category` table. Expenses can reference non-existent categories; category renames do not cascade.
+### FK repair scope is single-file
+Step 8 queues the file containing the FK violation (e.g. `models.py`) for repair. When a model field is renamed from `category = Column(String)` to `category_id = Column(Integer, ForeignKey(...))`, the CRUD layer and schemas also need updating — but they are not in the failed_files set. The repair produces a correct model but an inconsistent CRUD, which the reviewer catches as SEVERE. The fix is to queue `models.py + crud/*.py + schemas.py` together when an FK rename repair fires.
 
 ### Authentication absence
 All generated APIs expose all endpoints publicly. Authentication is a brief-level gap, not a generation failure.
@@ -139,19 +146,16 @@ All generated APIs expose all endpoints publicly. Authentication is a brief-leve
 
 ## Recommended Next Steps
 
-### 1. Validator: audit-trail bypass detection
-Add an AST check: if a `StockMovement` or similar history model exists, flag any Update schema (class names ending in `Update`) that contains a field matching the audited column (e.g. `stock_quantity`). Trigger repair to remove the field from the Update schema.
+### 1. FK repair: broaden repair scope for rename changes
+When step 8 fires an FK violation that involves renaming a field (e.g. `category → category_id`), queue models.py + all CRUD files + schemas.py together for repair so the rename propagates consistently. Current limitation: only models.py is queued, leaving CRUD/schemas referencing the old field name and causing SEVERE reviewer severity.
 
-### 2. Validator: FK referential integrity
-Add an AST check: scan SQLAlchemy model classes for `Column(String)` or `Column(Integer)` fields whose names end in `_id`, `_name`, or match another model's primary key. Flag fields that semantically reference another table but lack a `ForeignKey(...)` declaration.
-
-### 3. Atomic stock mutation / concurrency validator
+### 2. Atomic stock mutation / concurrency validator
 Add a quality rule: "Replace read-modify-write patterns on numeric fields (stock_quantity, balance, count) with a single atomic SQL UPDATE using a WHERE guard. Check affected rowcount to detect constraint violations instead of reading first." Or add an AST detector for the read-then-write pattern without a lock.
 
-### 4. Validator: response_model completeness
+### 3. Validator: response_model completeness
 Add an AST check: scan FastAPI route definitions for endpoints whose `response_model` schema references nested relationships. Flag routes where the corresponding CRUD function does not use `joinedload` or `selectinload` for those relationships. Trigger repair to add eager loading.
 
-### 5. README/documentation fence validator (optional)
+### 4. README/documentation fence validator (optional)
 After repair runs, detect cases where the generated README still describes enum variants or endpoints that were removed by earlier repair steps. Flag the README for re-generation to stay in sync with the actual code.
 
 ---
@@ -171,11 +175,13 @@ The quality control layers now stack as follows:
 | Duplicate enum definitions | `_check_duplicate_enums()` AST scan | Deterministic |
 | Dead enum variants | `_check_dead_enum_variants()` AST scan | Deterministic |
 | Numeric field constraints | `_check_numeric_constraints()` AST scan | Deterministic |
+| Audit-trail bypasses | `_check_audit_trail_bypasses()` AST scan | Deterministic |
+| Referential integrity | `_check_referential_integrity()` AST scan | Deterministic |
 | Framework API correctness | Pydantic v2 prompt rules + reviewer enforcement | Probabilistic (high) |
-| Domain validation | Semantic prompt rules (cascade, audit trail) | Probabilistic (medium) |
+| Domain validation | Semantic prompt rules (cascade, datetime) | Probabilistic (medium) |
 | Semantic/concurrency | Reviewer LLM findings | Probabilistic (lower) |
 
-The clear next step is to continue migrating the remaining medium-reliability probabilistic rules (audit-trail bypass, FK integrity, concurrency) into the deterministic validator layer.
+The validator layer now has 5 deterministic AST steps. The immediate next step is fixing the repair scope for FK rename changes (step 1 above) before adding more detection steps.
 
 ---
 
@@ -184,12 +190,12 @@ The clear next step is to continue migrating the remaining medium-reliability pr
 ```
 agents/developer.py           — SYSTEM_PROMPT (13 API + 5 semantic + 5 Pydantic v2 + 4 DB enum + 4 single-source rules), filename mapper
 agents/reviewer.py            — LLM review, truncation + Pydantic + DB enum + single-source reviewer instructions
-core/validator.py             — 6-step validator: compileall, pip install, import check, duplicate enum, dead enum, numeric constraints + LLM repair
+core/validator.py             — 8-step validator: compileall, pip install, import check, duplicate enum, dead enum, numeric constraints, audit-trail bypass, referential integrity + LLM repair
 core/task_generator.py        — planner system prompt (FLAT LAYOUT rules)
 tests/test_developer.py       — 100 tests (filename mapper, prompt rules, all 31 system prompt rules)
 tests/test_reviewer.py        — 23 tests (truncation + Pydantic + DB enum + single-source reviewer prompt tests)
 tests/test_task_generator.py  — 7 tests (planner prompt coverage)
-tests/test_validator_strip.py — 65 tests (fence stripping + _enum_class_names + _check_duplicate_enums + _enum_members + _references_member_in_files + _check_dead_enum_variants + _field_numeric_constraint + _has_numeric_guard + _check_numeric_constraints)
+tests/test_validator_strip.py — 101 tests (fence stripping + enum helpers + numeric constraint helpers + audit helpers + referential integrity helpers)
 briefs/                       — expense_tracker, url_shortener, todo_api, blog_api, inventory_api
 memory/sessions/              — JSON session records for all past runs
 memory/reports/               — markdown review reports

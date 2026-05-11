@@ -52,9 +52,12 @@ All steps run in sequence. Any failure queues the responsible file for LLM repai
 7. audit_trail_bypass     — AST scan: audited field (stock_quantity, balance, …) appearing in an
                             Update/Patch schema or directly assigned in a generic update function,
                             when a history model (StockMovement, AuditLog, …) exists
+8. referential_integrity  — AST scan: ORM _id fields without ForeignKey; plain String/Integer
+                            fields whose names match an existing model class; relationship()
+                            without a matching FK column; association Table columns without FK
 ```
 
-Steps 1–3 target structure and syntax. Steps 4–7 target semantic correctness. Steps 6–7 return `(error_msg, Path)` pairs so the exact violating file is queued for repair rather than a heuristic guess.
+Steps 1–3 target structure and syntax. Steps 4–8 target semantic correctness. Steps 6–8 return `(error_msg, Path)` pairs so the exact violating file is queued for repair rather than a heuristic guess.
 
 ## Repair loop
 
@@ -88,8 +91,9 @@ Repair prompts include the full content of related context files (e.g. `models.p
 | Dead enum variants | `_check_dead_enum_variants()` AST scan | Deterministic |
 | Numeric field constraints | `_check_numeric_constraints()` AST scan | Deterministic |
 | Audit-trail bypass | `_check_audit_trail_bypasses()` AST scan | Deterministic |
+| Referential integrity | `_check_referential_integrity()` AST scan | Deterministic |
 | Framework API correctness | Pydantic v2 prompt rules + reviewer enforcement | Probabilistic (high) |
-| Domain validation | Semantic prompt rules (cascade, FK, datetime) | Probabilistic (medium) |
+| Domain validation | Semantic prompt rules (cascade, datetime) | Probabilistic (medium) |
 | Semantic / concurrency | Reviewer LLM JSON findings | Probabilistic (lower) |
 
 The architectural direction is to migrate items from the bottom of this table upward.

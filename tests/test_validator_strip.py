@@ -6,13 +6,17 @@ import textwrap
 
 from core.validator import (
     _assigns_field,
+    _column_call_has_fk,
+    _column_call_type,
     _enum_class_names,
     _enum_members,
     _field_numeric_constraint,
     _has_numeric_guard,
     _history_model_names,
     _is_generic_update_func,
+    _is_orm_model_class_base,
     _references_member_in_files,
+    _relationship_target,
     _strip_fences,
 )
 
@@ -904,3 +908,331 @@ class TestCheckAuditTrailBypasses:
         assert pairs
         _, path = pairs[0]
         assert "products.py" in path.name
+
+
+# ── _is_orm_model_class_base / _column_call_has_fk / _column_call_type / _relationship_target ──
+
+import ast as _ast2
+
+
+def _parse_class(src: str) -> _ast2.ClassDef:
+    tree = _ast2.parse(textwrap.dedent(src))
+    return tree.body[0]
+
+
+def _parse_call(src: str) -> _ast2.Call:
+    tree = _ast2.parse(src)
+    return tree.body[0].value
+
+
+class TestReferentialHelpers:
+    def test_bare_base_detected(self):
+        cls = _parse_class("class Product(Base):\n    pass\n")
+        assert _is_orm_model_class_base(cls.bases[0]) is True
+
+    def test_declarative_base_detected(self):
+        cls = _parse_class("class Product(DeclarativeBase):\n    pass\n")
+        assert _is_orm_model_class_base(cls.bases[0]) is True
+
+    def test_name_ending_in_base_detected(self):
+        cls = _parse_class("class Product(AppBase):\n    pass\n")
+        assert _is_orm_model_class_base(cls.bases[0]) is True
+
+    def test_plain_class_not_detected(self):
+        # "BaseModel" → doesn't end in "Base" (it ends in "Model"), not in _ORM_BASE_NAMES
+        cls = _parse_class("class Product(BaseModel):\n    pass\n")
+        assert _is_orm_model_class_base(cls.bases[0]) is False
+
+    def test_column_with_fk_detected(self):
+        call = _parse_call("Column(Integer, ForeignKey('products.id'))")
+        assert _column_call_has_fk(call) is True
+
+    def test_column_without_fk_not_detected(self):
+        call = _parse_call("Column(Integer)")
+        assert _column_call_has_fk(call) is False
+
+    def test_column_type_integer(self):
+        call = _parse_call("Column(Integer)")
+        assert _column_call_type(call) == "Integer"
+
+    def test_column_type_string(self):
+        call = _parse_call("Column(String)")
+        assert _column_call_type(call) == "String"
+
+    def test_column_type_callable_form(self):
+        # Column(String(255), ...) — type is called
+        call = _parse_call("Column(String(255))")
+        assert _column_call_type(call) == "String"
+
+    def test_column_type_empty_returns_none(self):
+        call = _parse_call("Column(primary_key=True)")
+        assert _column_call_type(call) is None
+
+    def test_relationship_target_string_arg(self):
+        call = _parse_call("relationship('Product')")
+        assert _relationship_target(call) == "Product"
+
+    def test_relationship_target_non_relationship_returns_none(self):
+        call = _parse_call("Column(Integer)")
+        assert _relationship_target(call) is None
+
+    def test_relationship_target_no_string_arg_returns_none(self):
+        call = _parse_call("relationship(back_populates='items')")
+        assert _relationship_target(call) is None
+
+
+# ── _check_referential_integrity ──────────────────────────────────────────────
+
+class TestCheckReferentialIntegrity:
+    def _make_validator(self, tmp_path: Path, files: dict[str, str]):
+        from core.logger import Logger
+        from core.models import OutputType, ProjectBrief, Session
+        from core.validator import ProjectValidator
+        for fname, content in files.items():
+            p = tmp_path / fname
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+        brief = ProjectBrief(
+            title="T", description="d", output_type=OutputType.API,
+            tech_stack=[], requirements=[], project_dir=str(tmp_path),
+        )
+        session = Session(brief=brief)
+        return ProjectValidator(tmp_path, session, Logger(session.id))
+
+    # ── Required test cases ──────────────────────────────────────────────────
+
+    def test_expense_category_plain_string_fails(self, tmp_path):
+        """Expense.category stored as Column(String) when Category model exists → error."""
+        v = self._make_validator(tmp_path, {
+            "models.py": textwrap.dedent("""\
+                from sqlalchemy import Column, Integer, String
+                from database import Base
+
+                class Category(Base):
+                    __tablename__ = "categories"
+                    id = Column(Integer, primary_key=True)
+                    name = Column(String)
+
+                class Expense(Base):
+                    __tablename__ = "expenses"
+                    id = Column(Integer, primary_key=True)
+                    category = Column(String)
+            """),
+        })
+        pairs = v._check_referential_integrity()
+        msgs = [m for m, _ in pairs]
+        assert any("category" in m and "Expense" in m for m in msgs)
+
+    def test_product_id_with_fk_passes(self, tmp_path):
+        """product_id = Column(Integer, ForeignKey(...)) → no error."""
+        v = self._make_validator(tmp_path, {
+            "models.py": textwrap.dedent("""\
+                from sqlalchemy import Column, Integer, ForeignKey
+                from database import Base
+
+                class StockMovement(Base):
+                    __tablename__ = "stock_movements"
+                    id = Column(Integer, primary_key=True)
+                    product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"))
+            """),
+        })
+        pairs = v._check_referential_integrity()
+        msgs = [m for m, _ in pairs]
+        assert not any("product_id" in m for m in msgs)
+
+    def test_association_table_without_fk_fails(self, tmp_path):
+        """Association Table(...) with Column without ForeignKey → error."""
+        v = self._make_validator(tmp_path, {
+            "models.py": textwrap.dedent("""\
+                from sqlalchemy import Column, Integer, Table
+                from database import Base
+
+                product_tags = Table(
+                    "product_tags",
+                    Base.metadata,
+                    Column("product_id", Integer),
+                    Column("tag_id", Integer),
+                )
+
+                class Product(Base):
+                    __tablename__ = "products"
+                    id = Column(Integer, primary_key=True)
+            """),
+        })
+        pairs = v._check_referential_integrity()
+        msgs = [m for m, _ in pairs]
+        assert any("product_id" in m and "product_tags" in m for m in msgs)
+        assert any("tag_id" in m and "product_tags" in m for m in msgs)
+
+    def test_association_table_with_fk_cascade_passes(self, tmp_path):
+        """Association Table with ForeignKey + ondelete=CASCADE → no error."""
+        v = self._make_validator(tmp_path, {
+            "models.py": textwrap.dedent("""\
+                from sqlalchemy import Column, Integer, ForeignKey, Table
+                from database import Base
+
+                product_tags = Table(
+                    "product_tags",
+                    Base.metadata,
+                    Column("product_id", Integer, ForeignKey("products.id", ondelete="CASCADE")),
+                    Column("tag_id", Integer, ForeignKey("tags.id", ondelete="CASCADE")),
+                )
+
+                class Product(Base):
+                    __tablename__ = "products"
+                    id = Column(Integer, primary_key=True)
+            """),
+        })
+        pairs = v._check_referential_integrity()
+        msgs = [m for m, _ in pairs]
+        assert not any("product_tags" in m for m in msgs)
+
+    def test_relationship_without_fk_column_fails(self, tmp_path):
+        """relationship('Product') with product_id = Column(Integer) (no FK) → error."""
+        v = self._make_validator(tmp_path, {
+            "models.py": textwrap.dedent("""\
+                from sqlalchemy import Column, Integer
+                from sqlalchemy.orm import relationship
+                from database import Base
+
+                class StockMovement(Base):
+                    __tablename__ = "stock_movements"
+                    id = Column(Integer, primary_key=True)
+                    product_id = Column(Integer)
+                    product = relationship("Product")
+            """),
+        })
+        pairs = v._check_referential_integrity()
+        msgs = [m for m, _ in pairs]
+        assert any("product_id" in m or "relationship" in m.lower() for m in msgs)
+
+    def test_valid_orm_relation_graph_passes(self, tmp_path):
+        """Properly structured FK + relationship → no error."""
+        v = self._make_validator(tmp_path, {
+            "models.py": textwrap.dedent("""\
+                from sqlalchemy import Column, Integer, ForeignKey
+                from sqlalchemy.orm import relationship
+                from database import Base
+
+                class Product(Base):
+                    __tablename__ = "products"
+                    id = Column(Integer, primary_key=True)
+                    movements = relationship("StockMovement", back_populates="product")
+
+                class StockMovement(Base):
+                    __tablename__ = "stock_movements"
+                    id = Column(Integer, primary_key=True)
+                    product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"))
+                    product = relationship("Product", back_populates="movements")
+            """),
+        })
+        pairs = v._check_referential_integrity()
+        assert pairs == []
+
+    # ── Additional edge cases ────────────────────────────────────────────────
+
+    def test_no_orm_models_returns_empty(self, tmp_path):
+        """No ORM model classes → check is skipped entirely."""
+        v = self._make_validator(tmp_path, {
+            "schemas.py": textwrap.dedent("""\
+                from pydantic import BaseModel
+                class ExpenseCreate(BaseModel):
+                    category: str
+            """),
+        })
+        pairs = v._check_referential_integrity()
+        assert pairs == []
+
+    def test_supplier_id_without_fk_fails(self, tmp_path):
+        """supplier_id = Column(Integer) with no ForeignKey → error (Pattern 1)."""
+        v = self._make_validator(tmp_path, {
+            "models.py": textwrap.dedent("""\
+                from sqlalchemy import Column, Integer
+                from database import Base
+
+                class Product(Base):
+                    __tablename__ = "products"
+                    id = Column(Integer, primary_key=True)
+                    supplier_id = Column(Integer)
+            """),
+        })
+        pairs = v._check_referential_integrity()
+        msgs = [m for m, _ in pairs]
+        assert any("supplier_id" in m and "Product" in m for m in msgs)
+
+    def test_error_message_contains_required_fields(self, tmp_path):
+        """Error message must contain file path, class name, field name, fix hint."""
+        v = self._make_validator(tmp_path, {
+            "models.py": textwrap.dedent("""\
+                from sqlalchemy import Column, Integer
+                from database import Base
+
+                class Expense(Base):
+                    __tablename__ = "expenses"
+                    id = Column(Integer, primary_key=True)
+                    product_id = Column(Integer)
+            """),
+        })
+        pairs = v._check_referential_integrity()
+        assert pairs
+        msg, path = pairs[0]
+        assert "models.py" in msg          # file path
+        assert "Expense" in msg            # class name
+        assert "product_id" in msg         # field name
+        assert "ForeignKey" in msg         # expected fix
+        assert path.name == "models.py"    # correct file queued for repair
+
+    def test_relationship_on_parent_side_not_flagged(self, tmp_path):
+        """Product.movements = relationship('StockMovement') is the parent side — no FK needed."""
+        v = self._make_validator(tmp_path, {
+            "models.py": textwrap.dedent("""\
+                from sqlalchemy import Column, Integer
+                from sqlalchemy.orm import relationship
+                from database import Base
+
+                class Product(Base):
+                    __tablename__ = "products"
+                    id = Column(Integer, primary_key=True)
+                    movements = relationship("StockMovement")
+            """),
+        })
+        pairs = v._check_referential_integrity()
+        # "movements" != "stockmovement" → Pattern 3 is not triggered
+        assert pairs == []
+
+    def test_relationship_with_no_id_column_at_all_fails(self, tmp_path):
+        """product = relationship('Product') with no product_id column → error (Pattern 3b)."""
+        v = self._make_validator(tmp_path, {
+            "models.py": textwrap.dedent("""\
+                from sqlalchemy import Column, Integer
+                from sqlalchemy.orm import relationship
+                from database import Base
+
+                class StockMovement(Base):
+                    __tablename__ = "stock_movements"
+                    id = Column(Integer, primary_key=True)
+                    product = relationship("Product")
+            """),
+        })
+        pairs = v._check_referential_integrity()
+        msgs = [m for m, _ in pairs]
+        assert any("product" in m and "StockMovement" in m for m in msgs)
+
+    def test_pycache_files_ignored(self, tmp_path):
+        """__pycache__ files are not scanned."""
+        v = self._make_validator(tmp_path, {
+            "models.py": textwrap.dedent("""\
+                from sqlalchemy import Column, Integer, ForeignKey
+                from database import Base
+
+                class Product(Base):
+                    __tablename__ = "products"
+                    id = Column(Integer, primary_key=True)
+                    supplier_id = Column(Integer, ForeignKey("suppliers.id"))
+            """),
+        })
+        cache = tmp_path / "__pycache__"
+        cache.mkdir()
+        (cache / "models.cpython-312.pyc").write_bytes(b"")
+        pairs = v._check_referential_integrity()
+        assert pairs == []

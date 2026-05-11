@@ -90,6 +90,12 @@ class ProjectValidator:
             if src_file.exists():
                 failed.add(src_file)
 
+        # 8) referential integrity check — deterministic; no LLM call needed
+        for msg, src_file in self._check_referential_integrity():
+            errors.append(msg)
+            if src_file.exists():
+                failed.add(src_file)
+
         if errors:
             self.logger.warning(
                 event="validation_failed",
@@ -426,6 +432,221 @@ class ProjectValidator:
 
         return results
 
+    def _check_referential_integrity(self) -> list[tuple[str, Path]]:
+        """
+        Return (error_msg, file_path) pairs for FK/referential integrity violations:
+
+        Pattern 1 — ORM class field ending in _id with no ForeignKey(...)
+        Pattern 2 — ORM class field whose name matches an existing model class but is
+                    stored as a plain String/Integer with no ForeignKey
+        Pattern 3 — relationship("Target") where the expected FK column exists in the
+                    same class but has no ForeignKey, or is entirely absent
+        Pattern 4 — module-level association Table(...) columns ending in _id with no FK
+        """
+        _SKIP = {"__pycache__", ".venv", ".git"}
+        all_py: list[Path] = [
+            f for f in sorted(self.project_dir.rglob("*.py"))
+            if not any(part in _SKIP for part in f.relative_to(self.project_dir).parts)
+        ]
+
+        # First pass: collect all ORM model class names across the project.
+        orm_class_names: set[str] = set()
+        for py_file in all_py:
+            try:
+                tree = ast.parse(py_file.read_text(encoding="utf-8"))
+            except (SyntaxError, UnicodeDecodeError):
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef) and any(
+                    _is_orm_model_class_base(b) for b in node.bases
+                ):
+                    orm_class_names.add(node.name)
+
+        if not orm_class_names:
+            return []  # No ORM models — nothing to check
+
+        results: list[tuple[str, Path]] = []
+
+        for py_file in all_py:
+            rel_str = str(py_file.relative_to(self.project_dir))
+            try:
+                tree = ast.parse(py_file.read_text(encoding="utf-8"))
+            except (SyntaxError, UnicodeDecodeError):
+                continue
+
+            # Patterns 1–3: inspect ORM model class bodies
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                if not any(_is_orm_model_class_base(b) for b in node.bases):
+                    continue
+                class_name = node.name
+
+                # field_name → has_fk
+                columns: dict[str, bool] = {}
+                # (field_name, target_class_name)
+                relationships: list[tuple[str, str]] = []
+
+                for item in node.body:
+                    if not isinstance(item, ast.Assign):
+                        continue
+                    for target in item.targets:
+                        if not isinstance(target, ast.Name):
+                            continue
+                        field_name = target.id
+                        if not isinstance(item.value, ast.Call):
+                            continue
+                        call = item.value
+
+                        rel_target = _relationship_target(call)
+                        if rel_target is not None:
+                            relationships.append((field_name, rel_target))
+                            continue
+
+                        # Only process Column(...) assignments
+                        func = call.func
+                        if not (
+                            (isinstance(func, ast.Name) and func.id == "Column") or
+                            (isinstance(func, ast.Attribute) and func.attr == "Column")
+                        ):
+                            continue
+
+                        has_fk = _column_call_has_fk(call)
+                        col_type = _column_call_type(call)
+                        columns[field_name] = has_fk
+
+                        # Pattern 1: _id field with no ForeignKey
+                        if field_name.endswith("_id") and not has_fk and col_type in _FK_INTEGER_TYPES:
+                            results.append((
+                                f"Referential integrity error in {rel_str} "
+                                f"(class {class_name}): "
+                                f"field '{field_name}' appears to be a foreign key "
+                                f"but is Column({col_type}) with no ForeignKey(...) "
+                                f"(detected: plain {col_type} column, no referential constraint). "
+                                f"Invalid IDs can be persisted and deletes will not cascade. "
+                                f"Fix: change to "
+                                f"Column({col_type}, ForeignKey(\"<table>.id\", ondelete=\"CASCADE\")).",
+                                py_file,
+                            ))
+
+                        # Pattern 2: field name matches an existing model — FK likely needed
+                        elif (
+                            not has_fk
+                            and col_type in ("String", "Integer", None)
+                            and field_name.lower() in _FK_REFERENCE_NAMES
+                        ):
+                            matching_model = next(
+                                (m for m in orm_class_names if m.lower() == field_name.lower()),
+                                None,
+                            )
+                            if matching_model:
+                                results.append((
+                                    f"Referential integrity error in {rel_str} "
+                                    f"(class {class_name}): "
+                                    f"field '{field_name}' is stored as "
+                                    f"Column({col_type or 'String'}) "
+                                    f"but a '{matching_model}' model exists in this project "
+                                    f"(detected: plain column with no ForeignKey). "
+                                    f"A plain {col_type or 'String'} column allows orphaned "
+                                    f"references — no integrity constraint enforces that the "
+                                    f"value matches a real {matching_model} row. "
+                                    f"Fix: replace '{field_name}' with "
+                                    f"'{field_name}_id = Column(Integer, ForeignKey("
+                                    f"\"{matching_model.lower()}s.id\", ondelete=\"CASCADE\"))' "
+                                    f"and add a relationship field.",
+                                    py_file,
+                                ))
+
+                # Pattern 3: relationship where the FK column should be on this class
+                for rel_field, rel_target in relationships:
+                    # Only flag when the field name equals the target name (lowercase):
+                    # product = relationship("Product") → this class owns the FK.
+                    # movements = relationship("StockMovement") → parent side, no FK needed.
+                    if rel_field.lower() != rel_target.lower():
+                        continue
+                    expected_fk = f"{rel_target.lower()}_id"
+                    if expected_fk in columns:
+                        if not columns[expected_fk]:
+                            results.append((
+                                f"Referential integrity error in {rel_str} "
+                                f"(class {class_name}): "
+                                f"relationship('{rel_target}') via '{rel_field}' "
+                                f"is backed by column '{expected_fk}' "
+                                f"but that column has no ForeignKey(...) "
+                                f"(detected: Column without ForeignKey cannot resolve the join). "
+                                f"Fix: add ForeignKey(\"{rel_target.lower()}s.id\") to the "
+                                f"'{expected_fk}' column definition.",
+                                py_file,
+                            ))
+                    else:
+                        results.append((
+                            f"Referential integrity error in {rel_str} "
+                            f"(class {class_name}): "
+                            f"relationship('{rel_target}') via '{rel_field}' "
+                            f"has no matching '{expected_fk}' ForeignKey column "
+                            f"(detected: relationship with no FK column in this class). "
+                            f"SQLAlchemy requires a ForeignKey column to resolve the join. "
+                            f"Fix: add "
+                            f"'{expected_fk} = Column(Integer, ForeignKey(\"{rel_target.lower()}s.id\"))' "
+                            f"to class {class_name}.",
+                            py_file,
+                        ))
+
+            # Pattern 4: module-level association Table(...) assignments
+            for node in tree.body:
+                if not isinstance(node, ast.Assign):
+                    continue
+                if not isinstance(node.value, ast.Call):
+                    continue
+                call = node.value
+                func = call.func
+                if not (
+                    (isinstance(func, ast.Name) and func.id == "Table") or
+                    (isinstance(func, ast.Attribute) and func.attr == "Table")
+                ):
+                    continue
+
+                table_name = (
+                    call.args[0].value
+                    if call.args and isinstance(call.args[0], ast.Constant)
+                    else "unknown"
+                )
+                var_name = next(
+                    (t.id for t in node.targets if isinstance(t, ast.Name)),
+                    str(table_name),
+                )
+
+                # Column(...) args start at index 2 (after table name + metadata)
+                for arg in call.args[2:]:
+                    if not isinstance(arg, ast.Call):
+                        continue
+                    arg_func = arg.func
+                    if not (
+                        (isinstance(arg_func, ast.Name) and arg_func.id == "Column") or
+                        (isinstance(arg_func, ast.Attribute) and arg_func.attr == "Column")
+                    ):
+                        continue
+                    if not arg.args or not isinstance(arg.args[0], ast.Constant):
+                        continue
+                    col_name = str(arg.args[0].value)
+                    if not col_name.endswith("_id"):
+                        continue
+                    if _column_call_has_fk(arg):
+                        continue
+                    results.append((
+                        f"Referential integrity error in {rel_str} "
+                        f"(association table '{var_name}'): "
+                        f"column '{col_name}' has no ForeignKey(...) "
+                        f"(detected: plain Column without referential constraint). "
+                        f"Association tables must use ForeignKey and ondelete=\"CASCADE\" "
+                        f"so rows are removed when parent rows are deleted. "
+                        f"Fix: change to Column(\"{col_name}\", Integer, "
+                        f"ForeignKey(\"<table>.id\", ondelete=\"CASCADE\")).",
+                        py_file,
+                    ))
+
+        return results
+
     def _collect_context(self, exclude: Path) -> dict[str, str]:
         context: dict[str, str] = {}
         for p in sorted(self.project_dir.glob("*.py")):
@@ -682,6 +903,77 @@ def _assigns_field(
             if isinstance(node.target, ast.Attribute) and node.target.attr == field_name:
                 return True
     return False
+
+
+# ── Referential integrity helpers ─────────────────────────────────────────────
+
+# Field names that semantically suggest a FK to a related entity (no _id suffix).
+_FK_REFERENCE_NAMES = frozenset({
+    "category", "supplier", "product", "user", "order", "customer",
+    "department", "vendor", "employee", "manager", "project", "tag",
+    "group", "role", "author", "owner", "parent", "client", "account",
+})
+
+# Integer-like column types that should carry ForeignKey when ending in _id.
+_FK_INTEGER_TYPES = frozenset({"Integer", "BigInteger", "SmallInteger"})
+
+_ORM_BASE_NAMES = frozenset({"Base", "DeclarativeBase", "SQLModel"})
+
+
+def _is_orm_model_class_base(base_node: ast.expr) -> bool:
+    """Return True if a class base looks like a SQLAlchemy/SQLModel declarative base."""
+    if isinstance(base_node, ast.Name):
+        return base_node.id in _ORM_BASE_NAMES or base_node.id.endswith("Base")
+    if isinstance(base_node, ast.Attribute):
+        return base_node.attr in _ORM_BASE_NAMES or base_node.attr.endswith("Base")
+    return False
+
+
+def _column_call_has_fk(call_node: ast.Call) -> bool:
+    """Return True if a Column(...) call contains a ForeignKey(...) positional argument."""
+    for arg in call_node.args:
+        if isinstance(arg, ast.Call):
+            func = arg.func
+            if (isinstance(func, ast.Name) and func.id == "ForeignKey") or (
+                isinstance(func, ast.Attribute) and func.attr == "ForeignKey"
+            ):
+                return True
+    return False
+
+
+def _column_call_type(call_node: ast.Call) -> str | None:
+    """Return the column type name from the first positional arg of Column(...)."""
+    if not call_node.args:
+        return None
+    first = call_node.args[0]
+    if isinstance(first, ast.Name):
+        return first.id
+    if isinstance(first, ast.Attribute):
+        return first.attr
+    if isinstance(first, ast.Call):
+        func = first.func
+        if isinstance(func, ast.Name):
+            return func.id
+        if isinstance(func, ast.Attribute):
+            return func.attr
+    return None
+
+
+def _relationship_target(call_node: ast.Call) -> str | None:
+    """Return the target model name from a relationship(...) call, or None."""
+    func = call_node.func
+    if not (
+        (isinstance(func, ast.Name) and func.id == "relationship") or
+        (isinstance(func, ast.Attribute) and func.attr == "relationship")
+    ):
+        return None
+    if (
+        call_node.args
+        and isinstance(call_node.args[0], ast.Constant)
+        and isinstance(call_node.args[0].value, str)
+    ):
+        return call_node.args[0].value
+    return None
 
 
 # Matches the first line that looks like valid Python — used to drop leading
