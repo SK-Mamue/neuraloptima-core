@@ -91,10 +91,15 @@ class ProjectValidator:
                 failed.add(src_file)
 
         # 8) referential integrity check — deterministic; no LLM call needed
-        for msg, src_file in self._check_referential_integrity():
+        for msg, src_file, extra_files in self._check_referential_integrity():
             errors.append(msg)
             if src_file.exists():
                 failed.add(src_file)
+            # Pattern 2 (field-rename) repairs require consistent changes across
+            # models + schemas + CRUD — queue all files that reference the old field.
+            for f in extra_files:
+                if f.exists():
+                    failed.add(f)
 
         if errors:
             self.logger.warning(
@@ -432,13 +437,17 @@ class ProjectValidator:
 
         return results
 
-    def _check_referential_integrity(self) -> list[tuple[str, Path]]:
+    def _check_referential_integrity(self) -> list[tuple[str, Path, list[Path]]]:
         """
-        Return (error_msg, file_path) pairs for FK/referential integrity violations:
+        Return (error_msg, primary_file, extra_repair_targets) triples.
+
+        extra_repair_targets is non-empty only for Pattern 2 (field-rename violations):
+        those repairs require consistent changes across models + schemas + CRUD, so all
+        files that reference the old field name are included in the repair scope.
 
         Pattern 1 — ORM class field ending in _id with no ForeignKey(...)
         Pattern 2 — ORM class field whose name matches an existing model class but is
-                    stored as a plain String/Integer with no ForeignKey
+                    stored as a plain String/Integer with no ForeignKey (field-rename)
         Pattern 3 — relationship("Target") where the expected FK column exists in the
                     same class but has no ForeignKey, or is entirely absent
         Pattern 4 — module-level association Table(...) columns ending in _id with no FK
@@ -465,7 +474,7 @@ class ProjectValidator:
         if not orm_class_names:
             return []  # No ORM models — nothing to check
 
-        results: list[tuple[str, Path]] = []
+        results: list[tuple[str, Path, list[Path]]] = []
 
         for py_file in all_py:
             rel_str = str(py_file.relative_to(self.project_dir))
@@ -515,7 +524,7 @@ class ProjectValidator:
                         col_type = _column_call_type(call)
                         columns[field_name] = has_fk
 
-                        # Pattern 1: _id field with no ForeignKey
+                        # Pattern 1: _id field with no ForeignKey — add FK in-place, no rename
                         if field_name.endswith("_id") and not has_fk and col_type in _FK_INTEGER_TYPES:
                             results.append((
                                 f"Referential integrity error in {rel_str} "
@@ -527,9 +536,12 @@ class ProjectValidator:
                                 f"Fix: change to "
                                 f"Column({col_type}, ForeignKey(\"<table>.id\", ondelete=\"CASCADE\")).",
                                 py_file,
+                                [],  # no rename → only this file needs repair
                             ))
 
-                        # Pattern 2: field name matches an existing model — FK likely needed
+                        # Pattern 2: field name matches an existing model — FK field-rename
+                        # This repair requires consistent changes in models + schemas + CRUD,
+                        # so all files referencing the old field name are queued.
                         elif (
                             not has_fk
                             and col_type in ("String", "Integer", None)
@@ -540,6 +552,7 @@ class ProjectValidator:
                                 None,
                             )
                             if matching_model:
+                                extra = _files_referencing_field(all_py, field_name, py_file)
                                 results.append((
                                     f"Referential integrity error in {rel_str} "
                                     f"(class {class_name}): "
@@ -550,16 +563,23 @@ class ProjectValidator:
                                     f"A plain {col_type or 'String'} column allows orphaned "
                                     f"references — no integrity constraint enforces that the "
                                     f"value matches a real {matching_model} row. "
-                                    f"Fix: replace '{field_name}' with "
+                                    f"This fix requires consistent changes across ALL files: "
+                                    f"(1) In {rel_str}: rename '{field_name}' to "
                                     f"'{field_name}_id = Column(Integer, ForeignKey("
                                     f"\"{matching_model.lower()}s.id\", ondelete=\"CASCADE\"))' "
-                                    f"and add a relationship field.",
+                                    f"and add '{field_name} = relationship(\"{matching_model}\")'. "
+                                    f"(2) In schemas: change '{field_name}: str' to "
+                                    f"'{field_name}_id: int' in Create/Update schemas. "
+                                    f"(3) In CRUD/route files: replace any reference to "
+                                    f"'.{field_name}' with '.{field_name}_id' and join "
+                                    f"{matching_model} when the human-readable name is needed.",
                                     py_file,
+                                    extra,  # schemas.py + crud/*.py that reference old field
                                 ))
 
-                # Pattern 3: relationship where the FK column should be on this class
+                # Pattern 3: relationship where the FK column should be on this class — no rename
                 for rel_field, rel_target in relationships:
-                    # Only flag when the field name equals the target name (lowercase):
+                    # Only flag when field name equals target name (lowercase):
                     # product = relationship("Product") → this class owns the FK.
                     # movements = relationship("StockMovement") → parent side, no FK needed.
                     if rel_field.lower() != rel_target.lower():
@@ -577,6 +597,7 @@ class ProjectValidator:
                                 f"Fix: add ForeignKey(\"{rel_target.lower()}s.id\") to the "
                                 f"'{expected_fk}' column definition.",
                                 py_file,
+                                [],  # no rename → only this file needs repair
                             ))
                     else:
                         results.append((
@@ -590,9 +611,10 @@ class ProjectValidator:
                             f"'{expected_fk} = Column(Integer, ForeignKey(\"{rel_target.lower()}s.id\"))' "
                             f"to class {class_name}.",
                             py_file,
+                            [],  # no rename → only this file needs repair
                         ))
 
-            # Pattern 4: module-level association Table(...) assignments
+            # Pattern 4: module-level association Table(...) assignments — no rename
             for node in tree.body:
                 if not isinstance(node, ast.Assign):
                     continue
@@ -643,6 +665,7 @@ class ProjectValidator:
                         f"Fix: change to Column(\"{col_name}\", Integer, "
                         f"ForeignKey(\"<table>.id\", ondelete=\"CASCADE\")).",
                         py_file,
+                        [],  # no rename → only this file needs repair
                     ))
 
         return results
@@ -918,6 +941,34 @@ _FK_REFERENCE_NAMES = frozenset({
 _FK_INTEGER_TYPES = frozenset({"Integer", "BigInteger", "SmallInteger"})
 
 _ORM_BASE_NAMES = frozenset({"Base", "DeclarativeBase", "SQLModel"})
+
+
+def _files_referencing_field(files: list[Path], field_name: str, exclude: Path) -> list[Path]:
+    """Return all files (except exclude) that reference field_name via AST.
+
+    Catches attribute access (obj.field_name), variable/annotation names, and
+    string literals — the three common ways a renamed field appears in dependent files.
+    """
+    refs: list[Path] = []
+    exclude_resolved = exclude.resolve()
+    for py_file in files:
+        if py_file.resolve() == exclude_resolved:
+            continue
+        try:
+            tree = ast.parse(py_file.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr == field_name:
+                refs.append(py_file)
+                break
+            if isinstance(node, ast.Name) and node.id == field_name:
+                refs.append(py_file)
+                break
+            if isinstance(node, ast.Constant) and node.value == field_name:
+                refs.append(py_file)
+                break
+    return refs
 
 
 def _is_orm_model_class_base(base_node: ast.expr) -> bool:

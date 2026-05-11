@@ -11,6 +11,7 @@ from core.validator import (
     _enum_class_names,
     _enum_members,
     _field_numeric_constraint,
+    _files_referencing_field,
     _has_numeric_guard,
     _history_model_names,
     _is_generic_update_func,
@@ -1020,7 +1021,7 @@ class TestCheckReferentialIntegrity:
             """),
         })
         pairs = v._check_referential_integrity()
-        msgs = [m for m, _ in pairs]
+        msgs = [m for m, *_ in pairs]
         assert any("category" in m and "Expense" in m for m in msgs)
 
     def test_product_id_with_fk_passes(self, tmp_path):
@@ -1037,7 +1038,7 @@ class TestCheckReferentialIntegrity:
             """),
         })
         pairs = v._check_referential_integrity()
-        msgs = [m for m, _ in pairs]
+        msgs = [m for m, *_ in pairs]
         assert not any("product_id" in m for m in msgs)
 
     def test_association_table_without_fk_fails(self, tmp_path):
@@ -1060,7 +1061,7 @@ class TestCheckReferentialIntegrity:
             """),
         })
         pairs = v._check_referential_integrity()
-        msgs = [m for m, _ in pairs]
+        msgs = [m for m, *_ in pairs]
         assert any("product_id" in m and "product_tags" in m for m in msgs)
         assert any("tag_id" in m and "product_tags" in m for m in msgs)
 
@@ -1084,7 +1085,7 @@ class TestCheckReferentialIntegrity:
             """),
         })
         pairs = v._check_referential_integrity()
-        msgs = [m for m, _ in pairs]
+        msgs = [m for m, *_ in pairs]
         assert not any("product_tags" in m for m in msgs)
 
     def test_relationship_without_fk_column_fails(self, tmp_path):
@@ -1103,7 +1104,7 @@ class TestCheckReferentialIntegrity:
             """),
         })
         pairs = v._check_referential_integrity()
-        msgs = [m for m, _ in pairs]
+        msgs = [m for m, *_ in pairs]
         assert any("product_id" in m or "relationship" in m.lower() for m in msgs)
 
     def test_valid_orm_relation_graph_passes(self, tmp_path):
@@ -1157,7 +1158,7 @@ class TestCheckReferentialIntegrity:
             """),
         })
         pairs = v._check_referential_integrity()
-        msgs = [m for m, _ in pairs]
+        msgs = [m for m, *_ in pairs]
         assert any("supplier_id" in m and "Product" in m for m in msgs)
 
     def test_error_message_contains_required_fields(self, tmp_path):
@@ -1175,7 +1176,7 @@ class TestCheckReferentialIntegrity:
         })
         pairs = v._check_referential_integrity()
         assert pairs
-        msg, path = pairs[0]
+        msg, path, _extra = pairs[0]
         assert "models.py" in msg          # file path
         assert "Expense" in msg            # class name
         assert "product_id" in msg         # field name
@@ -1215,7 +1216,7 @@ class TestCheckReferentialIntegrity:
             """),
         })
         pairs = v._check_referential_integrity()
-        msgs = [m for m, _ in pairs]
+        msgs = [m for m, *_ in pairs]
         assert any("product" in m and "StockMovement" in m for m in msgs)
 
     def test_pycache_files_ignored(self, tmp_path):
@@ -1236,3 +1237,196 @@ class TestCheckReferentialIntegrity:
         (cache / "models.cpython-312.pyc").write_bytes(b"")
         pairs = v._check_referential_integrity()
         assert pairs == []
+
+
+# ── _files_referencing_field / FK repair scope ────────────────────────────────
+
+class TestFilesReferencingField:
+    def _write(self, tmp_path: Path, name: str, content: str) -> Path:
+        p = tmp_path / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+        return p
+
+    def test_attribute_access_detected(self, tmp_path):
+        """obj.category attribute access → file included."""
+        f = self._write(tmp_path, "crud.py", "def get(db): return db.query(Expense).filter(Expense.category == 'x').all()\n")
+        models = self._write(tmp_path, "models.py", "x = 1\n")
+        result = _files_referencing_field([f, models], "category", models)
+        assert f in result
+        assert models not in result
+
+    def test_name_in_annotation_detected(self, tmp_path):
+        """category: str annotation → file included."""
+        f = self._write(tmp_path, "schemas.py", "class ExpenseCreate:\n    category: str\n")
+        models = self._write(tmp_path, "models.py", "x = 1\n")
+        result = _files_referencing_field([f, models], "category", models)
+        assert f in result
+
+    def test_string_literal_detected(self, tmp_path):
+        """'category' string literal → file included."""
+        f = self._write(tmp_path, "crud.py", 'data = {"category": expense.category}\n')
+        models = self._write(tmp_path, "models.py", "x = 1\n")
+        result = _files_referencing_field([f, models], "category", models)
+        assert f in result
+
+    def test_unrelated_file_excluded(self, tmp_path):
+        """File with no mention of the field → not included."""
+        f = self._write(tmp_path, "utils.py", "def helper():\n    return 42\n")
+        models = self._write(tmp_path, "models.py", "x = 1\n")
+        result = _files_referencing_field([f, models], "category", models)
+        assert f not in result
+
+    def test_exclude_file_not_in_result(self, tmp_path):
+        """The exclude file itself is never returned, even if it references the field."""
+        models = self._write(tmp_path, "models.py", "category = Column(String)\n")
+        result = _files_referencing_field([models], "category", models)
+        assert models not in result
+
+    def test_syntax_error_file_skipped(self, tmp_path):
+        """Unparseable file is silently skipped."""
+        bad = self._write(tmp_path, "bad.py", "class (\n")
+        models = self._write(tmp_path, "models.py", "x = 1\n")
+        result = _files_referencing_field([bad, models], "category", models)
+        assert bad not in result
+
+
+class TestFKRepairScope:
+    """Verify that Pattern 2 violations include all dependent files in repair targets."""
+
+    def _make_validator(self, tmp_path: Path, files: dict[str, str]):
+        from core.logger import Logger
+        from core.models import OutputType, ProjectBrief, Session
+        from core.validator import ProjectValidator
+        for fname, content in files.items():
+            p = tmp_path / fname
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+        brief = ProjectBrief(
+            title="T", description="d", output_type=OutputType.API,
+            tech_stack=[], requirements=[], project_dir=str(tmp_path),
+        )
+        session = Session(brief=brief)
+        return ProjectValidator(tmp_path, session, Logger(session.id))
+
+    def test_pattern2_includes_models_schemas_crud(self, tmp_path):
+        """Expense.category violation queues models.py + schemas.py + crud/expenses.py."""
+        v = self._make_validator(tmp_path, {
+            "models.py": textwrap.dedent("""\
+                from sqlalchemy import Column, Integer, String
+                from database import Base
+                class Category(Base):
+                    __tablename__ = "categories"
+                    id = Column(Integer, primary_key=True)
+                class Expense(Base):
+                    __tablename__ = "expenses"
+                    id = Column(Integer, primary_key=True)
+                    category = Column(String)
+            """),
+            "schemas.py": textwrap.dedent("""\
+                from pydantic import BaseModel
+                class ExpenseCreate(BaseModel):
+                    category: str
+                    amount: float
+            """),
+            "crud/expenses.py": textwrap.dedent("""\
+                def get_expenses(db, category: str):
+                    return db.query(Expense).filter(Expense.category == category).all()
+            """),
+        })
+        pairs = v._check_referential_integrity()
+        assert pairs, "Expected at least one FK violation"
+        p2 = [(m, pf, ex) for m, pf, ex in pairs if "category" in m and "Expense" in m]
+        assert p2, "Pattern 2 violation for Expense.category not found"
+        _, primary, extra = p2[0]
+        all_targets = {primary} | set(extra)
+        names = {p.name for p in all_targets}
+        assert "models.py" in names
+        assert "schemas.py" in names
+        assert "expenses.py" in names
+
+    def test_pattern2_does_not_target_unrelated_files(self, tmp_path):
+        """Files that don't reference the old field are excluded from repair scope."""
+        v = self._make_validator(tmp_path, {
+            "models.py": textwrap.dedent("""\
+                from sqlalchemy import Column, Integer, String
+                from database import Base
+                class Category(Base):
+                    __tablename__ = "categories"
+                    id = Column(Integer, primary_key=True)
+                class Expense(Base):
+                    __tablename__ = "expenses"
+                    id = Column(Integer, primary_key=True)
+                    category = Column(String)
+            """),
+            "utils.py": "def health_check():\n    return True\n",
+        })
+        pairs = v._check_referential_integrity()
+        p2 = [(m, pf, ex) for m, pf, ex in pairs if "category" in m and "Expense" in m]
+        assert p2
+        _, _primary, extra = p2[0]
+        extra_names = {p.name for p in extra}
+        assert "utils.py" not in extra_names
+
+    def test_valid_fk_model_returns_no_repair_targets(self, tmp_path):
+        """category_id = Column(Integer, ForeignKey(...)) → no violation, no repair targets."""
+        v = self._make_validator(tmp_path, {
+            "models.py": textwrap.dedent("""\
+                from sqlalchemy import Column, Integer, ForeignKey
+                from sqlalchemy.orm import relationship
+                from database import Base
+                class Category(Base):
+                    __tablename__ = "categories"
+                    id = Column(Integer, primary_key=True)
+                class Expense(Base):
+                    __tablename__ = "expenses"
+                    id = Column(Integer, primary_key=True)
+                    category_id = Column(Integer, ForeignKey("categories.id", ondelete="CASCADE"))
+                    category = relationship("Category")
+            """),
+        })
+        pairs = v._check_referential_integrity()
+        assert pairs == []
+
+    def test_pattern1_extra_files_empty(self, tmp_path):
+        """Pattern 1 (_id field without FK) does not expand repair scope."""
+        v = self._make_validator(tmp_path, {
+            "models.py": textwrap.dedent("""\
+                from sqlalchemy import Column, Integer
+                from database import Base
+                class Product(Base):
+                    __tablename__ = "products"
+                    id = Column(Integer, primary_key=True)
+                    supplier_id = Column(Integer)
+            """),
+            "schemas.py": "supplier_id = 1\n",
+        })
+        pairs = v._check_referential_integrity()
+        p1 = [(m, pf, ex) for m, pf, ex in pairs if "supplier_id" in m]
+        assert p1
+        _, _primary, extra = p1[0]
+        assert extra == []  # Pattern 1 is a local fix — no rename, no extra files
+
+    def test_pattern2_error_message_covers_all_files(self, tmp_path):
+        """Pattern 2 error message must explicitly instruct repair of schemas and CRUD."""
+        v = self._make_validator(tmp_path, {
+            "models.py": textwrap.dedent("""\
+                from sqlalchemy import Column, Integer, String
+                from database import Base
+                class Category(Base):
+                    __tablename__ = "categories"
+                    id = Column(Integer, primary_key=True)
+                class Expense(Base):
+                    __tablename__ = "expenses"
+                    id = Column(Integer, primary_key=True)
+                    category = Column(String)
+            """),
+        })
+        pairs = v._check_referential_integrity()
+        p2 = [(m, pf, ex) for m, pf, ex in pairs if "category" in m and "Expense" in m]
+        assert p2
+        msg, _, _ = p2[0]
+        assert "category_id" in msg        # new field name stated
+        assert "category" in msg           # old field name stated
+        assert "schemas" in msg.lower()    # schemas mentioned
+        assert "crud" in msg.lower() or "route" in msg.lower()  # CRUD/routes mentioned
