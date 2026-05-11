@@ -1,9 +1,9 @@
 # NeuralOptima Core — Handoff Summary
 
-**Date:** 2026-05-10  
+**Date:** 2026-05-11  
 **Branch:** `master` — clean, in sync with `origin/master`  
-**Last commit:** `0b2f9a0` Validate duplicate enum definitions  
-**Test suite:** 143 tests, all passing
+**Last commit:** `a277084` Validate dead enum variants  
+**Test suite:** 162 tests, all passing
 
 ---
 
@@ -34,6 +34,7 @@ Brief (txt) → Task planner (LLM) → DeveloperAgent (generates files)
 | `c0d09e6` | **DB enum enforcement** — New `DB ENUM ENFORCEMENT RULES` section in `SYSTEM_PROMPT`: use `Column(Enum(MyEnum))` instead of `Column(String)` for enum-backed fields; require `(str, PyEnum)` base class; define enum in one place and import into both model and schema; SQLite-compatible note. Reviewer prompt gains a `DB ENUM ENFORCEMENT` block. Adds 3 developer + 1 reviewer prompt tests. |
 | `b8cf583` | **Enum single-source rules** — New `ENUM SINGLE-SOURCE-OF-TRUTH RULES` section in `SYSTEM_PROMPT`: define each enum exactly once in models.py; schemas.py must import, never redefine; same imported class object required for both `Column(Enum(...))` and Pydantic field. Reviewer prompt gains an `ENUM SINGLE-SOURCE-OF-TRUTH` block. Adds 3 developer + 1 reviewer prompt tests. |
 | `0b2f9a0` | **Deterministic duplicate enum validator** — `ProjectValidator.run()` gains a 4th check: `_check_duplicate_enums()` scans all generated `.py` files with the `ast` module, detects class names inheriting from any Enum base appearing in more than one file, and fails validation with a message naming the class, both files, and the required fix. Duplicate detection queues `schemas.py` for LLM repair; the repair receives `models.py` as context and replaces the duplicate class definition with `from models import EnumName`. Adds 9 new tests (5 for `_enum_class_names`, 4 for `_check_duplicate_enums`). |
+| `a277084` | **Deterministic dead enum variant validator** — `ProjectValidator.run()` gains a 5th check: `_check_dead_enum_variants()` scans all generated `.py` files with the `ast` module, collects each enum member (via new `_enum_members()` helper), then scans all other project files (via new `_references_member_in_files()` helper) for attribute access (`EnumClass.MEMBER`) or exact string constant (`"value"`) references. Members with zero external references are flagged as dead variants. Detection queues `models.py` for LLM repair so the unused member is removed. Adds 19 new tests (5 `TestEnumMembers`, 7 `TestReferencesMemberInFiles`, 7 `TestCheckDeadEnumVariants`). Verified on `inventory_api`: `MovementType.adjustment` detected and removed by repair; dead enum warning eliminated. |
 
 ---
 
@@ -45,7 +46,7 @@ Brief (txt) → Task planner (LLM) → DeveloperAgent (generates files)
 | Traversal path safety | `"../evil.py"` partially matched as `"evil.py"` | Returns `None`; prefix check prevents any traversal bypass |
 | Duplicate-key errors | `IntegrityError` propagated as unhandled 500 | Wrapped in `try/except`; re-raised as `HTTPException(409)` |
 | Schema ordering | Forward references caused declaration-order bugs | Schemas now declared in dependency order |
-| Dead enum variants | `adjustment` added "for completeness" with no route | Omitted unless brief requires it (prompt rule; validator pending) |
+| Dead enum variants | `adjustment` added "for completeness" with no route | Caught by `_check_dead_enum_variants()`; repaired by removing unused member from models.py |
 | Stock operations | Two `db.commit()` calls in one endpoint (split transaction) | Single commit after all model changes |
 | Datetime deprecation | `datetime.utcnow()` (deprecated, naive) | `datetime.now(timezone.utc)` in app logic; `server_default=func.now()` in SQLite column defaults |
 | Unused imports | `field_validator`, `List`, `Optional` imported but unused | Removed |
@@ -63,28 +64,35 @@ Brief (txt) → Task planner (LLM) → DeveloperAgent (generates files)
 
 ---
 
-## Validation Pipeline (4 steps)
+## Validation Pipeline (5 steps)
 
 ```
 1. python_compile   — syntax check via compileall
 2. pip_install      — install requirements.txt so import check resolves deps
 3. app_import_check — import all generated modules; catch missing deps / circular imports
-4. enum_check       — ast scan for duplicate enum class names across files (deterministic)
-   → any failure → LLM repair → re-run all 4 steps
+4. duplicate_enum   — ast scan for enum class names defined in more than one file (deterministic)
+5. dead_enum        — ast scan for enum members with no external references (deterministic)
+   → any failure → LLM repair → re-run all 5 steps
 ```
 
-Step 4 is no-LLM, no false negatives. Any enum class (inheriting from `Enum`, `PyEnum`, `IntEnum`, `StrEnum`, `Flag`, `IntFlag`, or `enum.Enum`) that appears under the same name in more than one file triggers an immediate failure with a clear message identifying the class, both files, and the fix. `schemas.py` is queued for repair; the repair prompt provides `models.py` as context so Claude replaces the duplicate class with an import.
+**Step 4** fires when any enum class (inheriting from `Enum`, `PyEnum`, `IntEnum`, `StrEnum`, `Flag`, `IntFlag`, or `enum.Enum`) appears under the same name in more than one file. `schemas.py` is queued for repair; the repair prompt provides `models.py` as context so Claude replaces the duplicate class with an import.
+
+**Step 5** fires when any enum member has zero references in files other than the one that defines it. A reference is either an attribute access (`EnumClass.MEMBER`) or an exact string constant matching the member's value (`"restock"`). `models.py` is queued for repair so the LLM removes the unused member. The detection logic is:
+
+- `_enum_members(path)` — parses a file's AST and returns `{ClassName: [(MEMBER_NAME, value_str), ...]}` for every enum class.
+- `_references_member_in_files(files, member_name, member_value)` — walks the AST of each file looking for `ast.Attribute` nodes whose `.attr` matches `member_name`, or `ast.Constant` string nodes whose value matches `member_value` (case-insensitive, exact).
+- `_check_dead_enum_variants()` — combines the two helpers, builds the error string (class name, member name/value, files inspected, fix instruction), and returns all dead-member errors.
 
 ---
 
 ## Current System Status
 
-- **Tests:** 143 passing, 0 failing
-- **`inventory_api` severity:** WARNING — duplicate enum eliminated by validator/repair; remaining issues are semantic and concurrency concerns
+- **Tests:** 162 passing, 0 failing
+- **`inventory_api` severity:** WARNING — dead enum `MovementType.adjustment` eliminated by validator/repair; remaining issues are eager-load risks and unrelated security notes
 - **`expense_tracker` severity:** WARNING — 3 bugs; FK referential integrity, status code mismatch, minor code quality
 - **Structural pipeline failures:** None.
 - **Framework API issues:** Eliminated (Pydantic v2 enforced; deprecated datetime patterns removed).
-- **Enum consistency:** Deterministic. Duplicate enum definitions are caught by the static validator and repaired before the reviewer runs.
+- **Enum consistency:** Significantly hardened. Duplicate definitions and dead variants are both caught by the static validator and repaired before the reviewer runs.
 - **Reviewer noise:** Eliminated. All reported findings are real code issues.
 
 ---
@@ -93,9 +101,6 @@ Step 4 is no-LLM, no false negatives. Any enum class (inheriting from `Enum`, `P
 
 ### Quantity constraint inconsistency
 `StockMovementRead.quantity` uses `Field(ge=0)` (allows zero) while `RestockRequest.quantity` and `SellRequest.quantity` use `Field(gt=0)` (rejects zero). A zero-quantity movement cannot be created through the public API, but a direct DB insert would pass the read schema. Minor inconsistency; validator rule pending.
-
-### Dead enum variant without endpoint
-The `adjustment` movement type is sometimes generated in `MovementType` despite the "no dead enum variants" prompt rule. The `adjustment` value exists in the DB column type but has no corresponding API route. The prompt rule is probabilistic; a static validator check would make this deterministic.
 
 ### TOCTOU race on stock mutations
 The sell and restock endpoints read stock quantity, check sufficiency, then write — without a row-level lock. Concurrent requests can both pass the check before either commits, producing negative stock. This requires an atomic `UPDATE ... WHERE stock_quantity >= :qty` pattern or a version counter; SQLite does not support `SELECT FOR UPDATE`.
@@ -113,29 +118,28 @@ All generated APIs expose all endpoints publicly. Authentication is a brief-leve
 
 ## Recommended Next Steps
 
-### 1. Validator: dead enum variant detection
-Add an AST check: scan models for `Column(Enum(MyEnum))` column definitions, then scan router files for routes that create movements/records of each enum value. Flag any enum member that has no corresponding route as a dead variant. This makes the "no dead enum variants" prompt rule deterministic.
-
-### 2. Validator: quantity constraint consistency
+### 1. Validator: quantity constraint consistency
 Add an AST check: scan Pydantic schemas for numeric fields named `quantity`, `amount`, `count`, `stock`, `price`. Flag any that are missing `ge=0` or `gt=0` in their `Field(...)` call. Trigger targeted repair for each violation.
 
-### 3. Validator: audit-trail bypass detection
+### 2. Validator: audit-trail bypass detection
 Add an AST check: if a `StockMovement` or similar history model exists, flag any Update schema (class names ending in `Update`) that contains a field matching the audited column (e.g. `stock_quantity`). Trigger repair to remove the field from the Update schema.
+
+### 3. Validator: FK referential integrity
+Add an AST check: scan SQLAlchemy model classes for `Column(String)` or `Column(Integer)` fields whose names end in `_id`, `_name`, or match another model's primary key. Flag fields that semantically reference another table but lack a `ForeignKey(...)` declaration.
 
 ### 4. Atomic stock mutation pattern
 Add a quality rule: "Replace read-modify-write patterns on numeric fields (stock_quantity, balance, count) with a single atomic SQL UPDATE using a WHERE guard. Check affected rowcount to detect constraint violations instead of reading first."
 
-### 5. FK referential integrity validator
-Add an AST check: scan SQLAlchemy model classes for `Column(String)` or `Column(Integer)` fields whose names end in `_id`, `_name`, or match another model's primary key. Flag fields that semantically reference another table but lack a `ForeignKey(...)` declaration.
-
-### 6. Semantic repair loop expansion
-Expand the validator's repair path to handle semantic violations (dead enum variants, quantity constraints, audit-trail bypasses) as well as structural failures. Each new static check generates a targeted error message that the repair LLM can act on — no new repair infrastructure needed, only new detection rules.
+### 5. Validator: response_model completeness
+Add an AST check: scan FastAPI route definitions for endpoints whose `response_model` schema references nested relationships. Flag routes where the corresponding CRUD function does not use `joinedload` or `selectinload` for those relationships. Trigger repair to add eager loading.
 
 ---
 
 ## Current Trajectory
 
-The pipeline has made a significant architectural maturity step this session: **from prompt-only quality control to deterministic static validation with automatic repair**. The duplicate enum check is the first validator rule that enforces a semantic correctness property without any LLM involvement. It fires reliably on every run, never produces false negatives, and the downstream repair is already wired up.
+The pipeline has made two significant architectural maturity steps: **from prompt-only quality control to deterministic static validation with automatic repair**. Both duplicate enum definitions (step 4) and dead enum variants (step 5) are now caught by no-LLM, no-false-negative AST scans that fire reliably on every run. The downstream repair flow is already wired — each new static check only needs a detection rule and a structured error message; no new repair infrastructure is required.
+
+The validator layer is becoming the core quality gate. The pattern is now established: identify a class of probabilistic prompt rule failures, write an AST check that detects it deterministically, and wire it into the pipeline as a new step. Each migration unconditionally eliminates a class of reviewer findings and reduces dependency on LLM compliance.
 
 The quality control layers now stack as follows:
 
@@ -144,28 +148,29 @@ The quality control layers now stack as follows:
 | Structural correctness | `_resolve_filename`, planner FLAT LAYOUT rules | Deterministic |
 | Syntax + import validity | `compileall` + `app_import_check` | Deterministic |
 | Duplicate enum definitions | `_check_duplicate_enums()` AST scan | Deterministic |
+| Dead enum variants | `_check_dead_enum_variants()` AST scan | Deterministic |
 | Framework API correctness | Pydantic v2 prompt rules + reviewer enforcement | Probabilistic (high) |
 | Domain validation | Semantic prompt rules (`Field(ge=0)`, cascade, audit trail) | Probabilistic (medium) |
 | Semantic/concurrency | Reviewer LLM findings | Probabilistic (lower) |
 
-The clear next step is to move the medium-reliability probabilistic rules (quantity constraints, dead enum variants, audit-trail bypass) into the deterministic validator layer. Each such migration eliminates a whole class of review findings unconditionally and reduces dependency on LLM compliance.
+The clear next step is to continue migrating the medium-reliability probabilistic rules (quantity constraints, audit-trail bypass, FK integrity) into the deterministic validator layer.
 
 ---
 
 ## Key Files
 
 ```
-agents/developer.py          — SYSTEM_PROMPT (13 API + 5 semantic + 5 Pydantic v2 + 4 DB enum + 4 single-source rules), filename mapper
-agents/reviewer.py           — LLM review, truncation + Pydantic + DB enum + single-source reviewer instructions
-core/validator.py            — 4-step validator: compileall, pip install, import check, duplicate enum AST scan + LLM repair
-core/task_generator.py       — planner system prompt (FLAT LAYOUT rules)
-tests/test_developer.py      — 100 tests (filename mapper, prompt rules, all 31 system prompt rules)
-tests/test_reviewer.py       — 23 tests (truncation + Pydantic + DB enum + single-source reviewer prompt tests)
-tests/test_task_generator.py — 7 tests (planner prompt coverage)
-tests/test_validator_strip.py — 20 tests (fence stripping + _enum_class_names + _check_duplicate_enums)
-briefs/                      — expense_tracker, url_shortener, todo_api, blog_api, inventory_api
-memory/sessions/             — JSON session records for all past runs
-memory/reports/              — markdown review reports
+agents/developer.py           — SYSTEM_PROMPT (13 API + 5 semantic + 5 Pydantic v2 + 4 DB enum + 4 single-source rules), filename mapper
+agents/reviewer.py            — LLM review, truncation + Pydantic + DB enum + single-source reviewer instructions
+core/validator.py             — 5-step validator: compileall, pip install, import check, duplicate enum AST scan, dead enum AST scan + LLM repair
+core/task_generator.py        — planner system prompt (FLAT LAYOUT rules)
+tests/test_developer.py       — 100 tests (filename mapper, prompt rules, all 31 system prompt rules)
+tests/test_reviewer.py        — 23 tests (truncation + Pydantic + DB enum + single-source reviewer prompt tests)
+tests/test_task_generator.py  — 7 tests (planner prompt coverage)
+tests/test_validator_strip.py — 39 tests (fence stripping + _enum_class_names + _check_duplicate_enums + _enum_members + _references_member_in_files + _check_dead_enum_variants)
+briefs/                       — expense_tracker, url_shortener, todo_api, blog_api, inventory_api
+memory/sessions/              — JSON session records for all past runs
+memory/reports/               — markdown review reports
 ```
 
 ## Verify State
@@ -176,7 +181,7 @@ cd /opt/agent-lab/projects/neuraloptima-core
 # Tests
 PYTHONPATH=. .venv/bin/pytest -q
 
-# Smoke run (watch for "Validation failed — attempting repair" on enum duplicates)
+# Smoke run (watch for "Validation failed — attempting repair" on dead/duplicate enum variants)
 .venv/bin/python cli.py run briefs/inventory_api.txt
 
 # Git
