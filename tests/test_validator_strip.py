@@ -5,10 +5,13 @@ from pathlib import Path
 import textwrap
 
 from core.validator import (
+    _assigns_field,
     _enum_class_names,
     _enum_members,
     _field_numeric_constraint,
     _has_numeric_guard,
+    _history_model_names,
+    _is_generic_update_func,
     _references_member_in_files,
     _strip_fences,
 )
@@ -685,6 +688,219 @@ class TestCheckNumericConstraints:
             """),
         })
         pairs = v._check_numeric_constraints()
+        assert pairs
+        _, path = pairs[0]
+        assert "products.py" in path.name
+
+
+# ── _history_model_names / _is_generic_update_func / _assigns_field ───────────
+
+class TestAuditHelpers:
+    def _write(self, tmp_path: Path, name: str, content: str) -> Path:
+        p = tmp_path / name
+        p.write_text(content, encoding="utf-8")
+        return p
+
+    def test_stock_movement_detected(self, tmp_path):
+        p = self._write(tmp_path, "models.py", textwrap.dedent("""\
+            class StockMovement:
+                pass
+        """))
+        assert "StockMovement" in _history_model_names(p)
+
+    def test_audit_log_detected(self, tmp_path):
+        p = self._write(tmp_path, "models.py", "class AuditLog:\n    pass\n")
+        assert "AuditLog" in _history_model_names(p)
+
+    def test_non_history_class_ignored(self, tmp_path):
+        p = self._write(tmp_path, "models.py", "class Product:\n    pass\n")
+        assert _history_model_names(p) == set()
+
+    def test_syntax_error_returns_empty(self, tmp_path):
+        p = self._write(tmp_path, "m.py", "class (\n")
+        assert _history_model_names(p) == set()
+
+    def test_generic_update_func_detected(self):
+        assert _is_generic_update_func("update_product") is True
+        assert _is_generic_update_func("patch_item") is True
+
+    def test_movement_func_not_generic(self):
+        assert _is_generic_update_func("restock_product") is False
+        assert _is_generic_update_func("sell_product") is False
+        assert _is_generic_update_func("update_stock_movement") is False
+
+    def test_assigns_field_direct_assign(self):
+        fn = _parse_func("""\
+            def update_product(db, product, data):
+                product.stock_quantity = data.stock_quantity
+        """)
+        assert _assigns_field(fn, "stock_quantity") is True
+
+    def test_assigns_field_augassign(self):
+        fn = _parse_func("""\
+            def update_product(db, product, qty):
+                product.stock_quantity += qty
+        """)
+        assert _assigns_field(fn, "stock_quantity") is True
+
+    def test_assigns_field_different_attr_false(self):
+        fn = _parse_func("""\
+            def update_product(db, product, data):
+                product.name = data.name
+        """)
+        assert _assigns_field(fn, "stock_quantity") is False
+
+
+# ── _check_audit_trail_bypasses ───────────────────────────────────────────────
+
+class TestCheckAuditTrailBypasses:
+    def _make_validator(self, tmp_path: Path, files: dict[str, str]):
+        from core.logger import Logger
+        from core.models import OutputType, ProjectBrief, Session
+        from core.validator import ProjectValidator
+        for fname, content in files.items():
+            p = tmp_path / fname
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+        brief = ProjectBrief(
+            title="T", description="d", output_type=OutputType.API,
+            tech_stack=[], requirements=[], project_dir=str(tmp_path),
+        )
+        session = Session(brief=brief)
+        return ProjectValidator(tmp_path, session, Logger(session.id))
+
+    # ── Required test cases ──────────────────────────────────────────────────
+
+    def test_update_schema_with_stock_quantity_fails(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "models.py": "class StockMovement:\n    pass\n",
+            "schemas.py": textwrap.dedent("""\
+                from pydantic import BaseModel
+                from typing import Optional
+                class ProductUpdate(BaseModel):
+                    name: Optional[str] = None
+                    stock_quantity: Optional[int] = None
+            """),
+        })
+        pairs = v._check_audit_trail_bypasses()
+        msgs = [m for m, _ in pairs]
+        assert any("stock_quantity" in m and "ProductUpdate" in m for m in msgs)
+
+    def test_update_schema_without_stock_quantity_passes(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "models.py": "class StockMovement:\n    pass\n",
+            "schemas.py": textwrap.dedent("""\
+                from pydantic import BaseModel
+                from typing import Optional
+                class ProductUpdate(BaseModel):
+                    name: Optional[str] = None
+                    description: Optional[str] = None
+            """),
+        })
+        pairs = v._check_audit_trail_bypasses()
+        assert pairs == []
+
+    def test_generic_update_func_assigning_stock_quantity_fails(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "models.py": "class StockMovement:\n    pass\n",
+            "crud.py": textwrap.dedent("""\
+                def update_product(db, product, data):
+                    product.stock_quantity = data.stock_quantity
+                    db.commit()
+            """),
+        })
+        pairs = v._check_audit_trail_bypasses()
+        msgs = [m for m, _ in pairs]
+        assert any("stock_quantity" in m and "update_product" in m for m in msgs)
+
+    def test_dedicated_restock_sell_passes(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "models.py": "class StockMovement:\n    pass\n",
+            "crud.py": textwrap.dedent("""\
+                def restock_product(db, product, qty):
+                    product.stock_quantity += qty
+                    db.add(StockMovement(quantity=qty))
+                    db.commit()
+
+                def sell_product(db, product, qty):
+                    product.stock_quantity -= qty
+                    db.add(StockMovement(quantity=qty))
+                    db.commit()
+            """),
+        })
+        pairs = v._check_audit_trail_bypasses()
+        assert pairs == []
+
+    # ── Additional edge cases ────────────────────────────────────────────────
+
+    def test_no_history_model_no_violations(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "schemas.py": textwrap.dedent("""\
+                from pydantic import BaseModel
+                from typing import Optional
+                class ProductUpdate(BaseModel):
+                    stock_quantity: Optional[int] = None
+            """),
+        })
+        # No movement/history class exists → no audit trail to enforce
+        pairs = v._check_audit_trail_bypasses()
+        assert pairs == []
+
+    def test_error_message_contains_required_fields(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "models.py": "class StockMovement:\n    pass\n",
+            "schemas.py": textwrap.dedent("""\
+                from pydantic import BaseModel
+                from typing import Optional
+                class ProductUpdate(BaseModel):
+                    stock_quantity: Optional[int] = None
+            """),
+        })
+        pairs = v._check_audit_trail_bypasses()
+        assert pairs
+        msg, path = pairs[0]
+        assert "schemas.py" in msg          # file path
+        assert "ProductUpdate" in msg       # class name
+        assert "stock_quantity" in msg      # field name
+        assert "bypass" in msg.lower()      # detected pattern
+        assert "fix" in msg.lower()         # expected fix
+        assert path.name == "schemas.py"    # correct file queued
+
+    def test_audit_log_model_triggers_check(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "models.py": "class AuditLog:\n    pass\n",
+            "schemas.py": textwrap.dedent("""\
+                from pydantic import BaseModel
+                from typing import Optional
+                class ExpenseUpdate(BaseModel):
+                    balance: Optional[float] = None
+            """),
+        })
+        pairs = v._check_audit_trail_bypasses()
+        assert any("balance" in m for m, _ in pairs)
+
+    def test_patch_schema_suffix_also_caught(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "models.py": "class InventoryMovement:\n    pass\n",
+            "schemas.py": textwrap.dedent("""\
+                from pydantic import BaseModel
+                from typing import Optional
+                class ProductPatch(BaseModel):
+                    stock_quantity: Optional[int] = None
+            """),
+        })
+        pairs = v._check_audit_trail_bypasses()
+        assert any("ProductPatch" in m for m, _ in pairs)
+
+    def test_crud_file_queued_for_repair(self, tmp_path):
+        v = self._make_validator(tmp_path, {
+            "models.py": "class StockMovement:\n    pass\n",
+            "crud/products.py": textwrap.dedent("""\
+                def update_product(db, product, data):
+                    product.stock_quantity = data.stock_quantity
+            """),
+        })
+        pairs = v._check_audit_trail_bypasses()
         assert pairs
         _, path = pairs[0]
         assert "products.py" in path.name

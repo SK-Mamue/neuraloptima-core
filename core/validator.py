@@ -84,6 +84,12 @@ class ProjectValidator:
             if src_file.exists():
                 failed.add(src_file)
 
+        # 7) audit-trail bypass check — deterministic; no LLM call needed
+        for msg, src_file in self._check_audit_trail_bypasses():
+            errors.append(msg)
+            if src_file.exists():
+                failed.add(src_file)
+
         if errors:
             self.logger.warning(
                 event="validation_failed",
@@ -335,6 +341,91 @@ class ProjectValidator:
 
         return results
 
+    def _check_audit_trail_bypasses(self) -> list[tuple[str, Path]]:
+        """
+        Return (error_msg, file_path) pairs when audited/derived fields are mutated
+        outside of dedicated movement/history endpoints.
+
+        Two bypass patterns are detected:
+        1. An Update/Patch schema contains an audited field (schema-level bypass).
+        2. A generic update function directly assigns an audited field (code-level bypass).
+        """
+        _SKIP = {"__pycache__", ".venv", ".git"}
+        all_py: list[Path] = [
+            f for f in sorted(self.project_dir.rglob("*.py"))
+            if not any(part in _SKIP for part in f.relative_to(self.project_dir).parts)
+        ]
+
+        # Discover history/movement model names across the whole project first.
+        history_names: set[str] = set()
+        for py_file in all_py:
+            history_names.update(_history_model_names(py_file))
+
+        if not history_names:
+            return []  # No audit trail — nothing to check
+
+        results: list[tuple[str, Path]] = []
+        history_ctx = ", ".join(sorted(history_names))
+
+        for py_file in all_py:
+            rel_str = str(py_file.relative_to(self.project_dir))
+            try:
+                tree = ast.parse(py_file.read_text(encoding="utf-8"))
+            except (SyntaxError, UnicodeDecodeError):
+                continue
+
+            # Pattern 1: Update/Patch schema contains an audited field.
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                if not any(node.name.lower().endswith(s) for s in ("update", "patch")):
+                    continue
+                for item in node.body:
+                    if not isinstance(item, ast.AnnAssign):
+                        continue
+                    if not isinstance(item.target, ast.Name):
+                        continue
+                    field_name = item.target.id
+                    if field_name not in _AUDITED_FIELDS:
+                        continue
+                    results.append((
+                        f"Audit trail bypass in {rel_str} (class {node.name}): "
+                        f"audited field '{field_name}' is present in an Update schema "
+                        f"(detected: direct field inclusion). "
+                        f"Stock/balance fields must only change through dedicated movement "
+                        f"endpoints, not through generic update payloads. "
+                        f"History model(s) detected: {history_ctx}. "
+                        f"Fix: remove '{field_name}' from {node.name}; all mutations of "
+                        f"this field must go through the dedicated movement/restock/sell "
+                        f"endpoints that create a corresponding history record.",
+                        py_file,
+                    ))
+
+            # Pattern 2: Generic update function directly assigns an audited field.
+            for node in tree.body:
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if not _is_generic_update_func(node.name):
+                    continue
+                for field_name in _AUDITED_FIELDS:
+                    if not _assigns_field(node, field_name):
+                        continue
+                    results.append((
+                        f"Audit trail bypass in {rel_str} (function {node.name}): "
+                        f"directly assigns audited field '{field_name}' "
+                        f"(detected: attribute assignment outside movement function). "
+                        f"All mutations of stock/balance fields must go through dedicated "
+                        f"movement functions that create a history record. "
+                        f"History model(s) detected: {history_ctx}. "
+                        f"Fix: remove the direct assignment of '{field_name}' from "
+                        f"{node.name} and route all mutations through the dedicated "
+                        f"movement/restock/sell endpoint.",
+                        py_file,
+                    ))
+                    break  # one error per function
+
+        return results
+
     def _collect_context(self, exclude: Path) -> dict[str, str]:
         context: dict[str, str] = {}
         for p in sorted(self.project_dir.glob("*.py")):
@@ -528,6 +619,67 @@ def _has_numeric_guard(
                 for child in ast.walk(node.test)
             )
             if cmp_found and any(isinstance(s, (ast.Raise, ast.Return)) for s in node.body):
+                return True
+    return False
+
+
+# ── Audit-trail bypass helpers ─────────────────────────────────────────────
+
+# Fields whose values are derived exclusively from history/movement records.
+_AUDITED_FIELDS = frozenset({
+    "stock_quantity", "quantity_on_hand", "balance", "total_stock",
+})
+
+# Substrings that mark a class as a history/movement model.
+_HISTORY_CLASS_KEYWORDS = frozenset({
+    "movement", "auditlog", "inventorymovement", "transactionlog",
+    "history", "audit", "transaction",
+})
+
+# Function name fragments that mark a function as a dedicated movement handler.
+_MOVEMENT_FUNC_WORDS = frozenset({
+    "restock", "sell", "refund", "movement", "stock_in", "stock_out",
+    "adjust", "receive", "ship", "transfer", "add_stock", "remove_stock",
+})
+
+# Function name fragments that mark a function as a generic update handler.
+_GENERIC_UPDATE_WORDS = frozenset({"update", "patch", "edit", "modify"})
+
+
+def _history_model_names(path: Path) -> set[str]:
+    """Return names of classes whose names contain history/movement keywords."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (SyntaxError, UnicodeDecodeError):
+        return set()
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            lower = node.name.lower()
+            if any(kw in lower for kw in _HISTORY_CLASS_KEYWORDS):
+                names.add(node.name)
+    return names
+
+
+def _is_generic_update_func(func_name: str) -> bool:
+    """Return True if the function name looks like a generic update (not a dedicated movement)."""
+    lower = func_name.lower()
+    if any(word in lower for word in _MOVEMENT_FUNC_WORDS):
+        return False
+    return any(word in lower for word in _GENERIC_UPDATE_WORDS)
+
+
+def _assigns_field(
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef, field_name: str
+) -> bool:
+    """Return True if the function directly assigns or augments an attribute named field_name."""
+    for node in ast.walk(func_node):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Attribute) and target.attr == field_name:
+                    return True
+        if isinstance(node, ast.AugAssign):
+            if isinstance(node.target, ast.Attribute) and node.target.attr == field_name:
                 return True
     return False
 
