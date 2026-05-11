@@ -16,7 +16,7 @@ brief.txt
     │
     ▼
 [ProjectValidator]       core/validator.py
-  7-step deterministic + repair loop (see below)
+  9-step deterministic + repair loop (see below)
     │
     ▼
 [ReviewAgent]            agents/reviewer.py
@@ -37,9 +37,9 @@ Session saved to memory/sessions/<id>.json
 | ProjectValidator | None (AST) / claude-sonnet-4-6 (repair) | Project dir | Pass/fail + error list |
 | ReviewAgent | claude-sonnet-4-6 | Generated files (capped 6 000 chars each) | JSON review result |
 
-## Validation pipeline (7 steps)
+## Validation pipeline (9 steps)
 
-All steps run in sequence. Any failure queues the responsible file for LLM repair, then all 7 steps re-run from step 1.
+All steps run in sequence. Any failure queues the responsible file for LLM repair, then all 9 steps re-run from step 1.
 
 ```
 1. python_compile         — compileall syntax check on all generated .py files
@@ -55,9 +55,20 @@ All steps run in sequence. Any failure queues the responsible file for LLM repai
 8. referential_integrity  — AST scan: ORM _id fields without ForeignKey; plain String/Integer
                             fields whose names match an existing model class; relationship()
                             without a matching FK column; association Table columns without FK
+9. api_contract_consistency — AST scan: cross-layer contract violations between route, schema,
+                            and ORM layers:
+                            (A) DELETE status_code=204 + response_model declared
+                            (B) POST status_code=204 (should be 200 or 201)
+                            (C) CRUD-style GET/POST route missing response_model
+                            (D) list-semantics route body returns dict literal
+                            (E) single-item route body returns list literal
+                            (F) IntegrityError/UniqueViolation caught → HTTPException(400)
+                                raised (must be 409 Conflict)
+                            (G) Pydantic Create/Update schema has field: str where ORM
+                                stores field_id as a FK integer column
 ```
 
-Steps 1–3 target structure and syntax. Steps 4–8 target semantic correctness. Steps 6–8 return `(error_msg, Path)` pairs so the exact violating file is queued for repair rather than a heuristic guess.
+Steps 1–3 target structure and syntax. Steps 4–9 target semantic correctness. Steps 6–8 return `(error_msg, Path)` 2-tuples; step 8 returns `(error_msg, Path, extra_files)` 3-tuples for dependency-aware rename repairs; step 9 returns `(error_msg, Path)` 2-tuples.
 
 ## Repair loop
 
@@ -75,7 +86,7 @@ validate() returns errors
            write patched content back to project dir
            │
            ▼
-       re-run all 7 validation steps from scratch
+       re-run all 9 validation steps from scratch
        (max iterations: 3)
 ```
 
@@ -92,6 +103,7 @@ Repair prompts include the full content of related context files (e.g. `models.p
 | Numeric field constraints | `_check_numeric_constraints()` AST scan | Deterministic |
 | Audit-trail bypass | `_check_audit_trail_bypasses()` AST scan | Deterministic |
 | Referential integrity | `_check_referential_integrity()` AST scan | Deterministic |
+| API contract consistency | `_check_api_contract_consistency()` AST scan | Deterministic |
 | Framework API correctness | Pydantic v2 prompt rules + reviewer enforcement | Probabilistic (high) |
 | Domain validation | Semantic prompt rules (cascade, datetime) | Probabilistic (medium) |
 | Semantic / concurrency | Reviewer LLM JSON findings | Probabilistic (lower) |
@@ -122,7 +134,7 @@ neuraloptima-core/
 ├── core/
 │   ├── models.py                 — ProjectBrief, Task, Session, ReviewResult, LogEntry
 │   ├── orchestrator.py           — Brief → Tasks → execute → validate → review → save
-│   ├── validator.py              — 7-step AST validator + LLM repair loop
+│   ├── validator.py              — 9-step AST validator + LLM repair loop
 │   ├── task_generator.py         — LLM task planner
 │   ├── llm.py                    — bare ask_claude() wrapper
 │   └── logger.py                 — structured JSONL + Rich console logging
@@ -139,7 +151,7 @@ neuraloptima-core/
 │   ├── test_developer.py         — 100 tests: filename mapper + all SYSTEM_PROMPT rules
 │   ├── test_reviewer.py          — 23 tests: reviewer prompt coverage
 │   ├── test_task_generator.py    — 7 tests: planner FLAT LAYOUT rules
-│   └── test_validator_strip.py   — 76 tests: fence stripping + all AST validator helpers
+│   └── test_validator_strip.py   — 140 tests: fence stripping + all AST validator helpers
 │
 ├── briefs/                       — plain-text project briefs for benchmark runs
 ├── memory/sessions/              — JSON session records
@@ -155,6 +167,6 @@ neuraloptima-core/
 
 ## Architectural maturity
 
-The pipeline is feature-complete for a Phase 1 worker. The quality layer is past its initial probabilistic-only phase: 4 of the 7 validator steps are deterministic AST checks. The next maturity step is continuing to migrate medium-reliability probabilistic rules (FK integrity, concurrency, response_model completeness) into deterministic validator steps using the same `(error_msg, Path)` return pattern established in steps 6 and 7.
+The pipeline is feature-complete for a Phase 1 worker. The quality layer has progressed through three maturity phases: syntax validation (steps 1–3), intra-file semantic constraints (steps 4–7), and cross-layer semantic consistency (steps 8–9). All 6 deterministic AST steps (4–9) use the same `(error_msg, Path)` return pattern for targeted repair. Step 8 extends this with 3-tuples for dependency-aware multi-file repairs. The next maturity steps are FK existence validation (confirming FK target tables exist) and response_model completeness (confirming CRUD queries eager-load nested schema fields) — both follow the established cross-file reference scanning pattern.
 
 Context injection into LLM agents is exclusively through hardcoded `SYSTEM_PROMPT` strings in `agents/developer.py`, `agents/reviewer.py`, and `core/task_generator.py`. No doc files are read at runtime by any agent — new rules must be added directly to those strings.

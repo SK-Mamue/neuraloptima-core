@@ -2,8 +2,8 @@
 
 **Date:** 2026-05-11  
 **Branch:** `master` — clean, in sync with `origin/master`  
-**Last commit:** `c792b54` Expand FK repair scope  
-**Test suite:** 242 tests, all passing
+**Last commit:** `c151bff` Validate API contract consistency  
+**Test suite:** 264 tests, all passing
 
 ---
 
@@ -38,6 +38,7 @@ Brief (txt) → Task planner (LLM) → DeveloperAgent (generates files)
 | `35be98a` | **Deterministic numeric constraint validator** — `ProjectValidator.run()` gains a 6th check: `_check_numeric_constraints()` scans all generated `.py` files for two violation classes. (1) Schema fields: `AnnAssign` nodes in non-read Pydantic classes are checked against field-category rules — `quantity`/`amount` must have `Field(gt=0)`; `stock_quantity`/`count`/`balance` accept `Field(ge=0)` or `Field(gt=0)`; `price`/`cost`/`rate`/`total`/`subtotal` must have `Field(gt=0)`. `Optional` fields and `PositiveInt`/`PositiveFloat` annotations are skipped. Read/Response/Out classes are skipped entirely. (2) Function parameters: module-level (non-route-handler) functions with a raw `quantity: int` or `amount: int` parameter are required to have a zero/negative guard (`if param <= 0: raise` or `assert param > 0`). Unlike previous checks, returns `(error_msg, Path)` pairs so the exact violating file is queued for repair. Adds 5 new helpers (`_field_numeric_constraint`, `_is_optional_annotation`, `_is_route_handler`, `_compare_involves`, `_has_numeric_guard`) and 26 new tests (6 `TestFieldNumericConstraint`, 6 `TestHasNumericGuard`, 14 `TestCheckNumericConstraints`). Verified on `inventory_api`: LLM generated correct constraints; validator stayed silent as expected safety net. |
 | `cbff6d5` | **Deterministic referential integrity validator** — `ProjectValidator.run()` gains an 8th check: `_check_referential_integrity()` scans all generated `.py` files using the `ast` module and detects four FK/referential integrity patterns. (1) ORM class fields ending in `_id` with `Column(Integer)` but no `ForeignKey(...)`. (2) ORM class fields whose names match an existing model class (e.g. `Expense.category = Column(String)` when `Category` exists) — semantically a reference but without a FK constraint. (3) `relationship("Target")` where the expected `target_id` FK column exists in the same class but has no `ForeignKey`, or is absent entirely. (4) Module-level association `Table(...)` with column names ending in `_id` but no `ForeignKey`. Initially returned `(error_msg, Path)` 2-tuples; caused SEVERE regression in expense_tracker when Pattern 2 repair only fixed models.py while CRUD/schemas still referenced the old field name. |
 | `c792b54` | **FK repair scope expansion** — `_check_referential_integrity()` return type changed to `(error_msg, primary_file, extra_files)` 3-tuples. Pattern 2 (field name matches a model class — the rename case) now calls new `_files_referencing_field()` helper to scan all project `.py` files for `ast.Attribute`, `ast.Name`, and `ast.Constant` matches on the old field name, then returns all dependent files (schemas.py, crud/*.py) as `extra_files`. Step 8 wiring in `run()` adds both `src_file` and every file in `extra_files` to the `failed` set so LLM repair receives the full rename scope. Error message updated to explicitly describe the three-part rename: (1) models.py rename + FK + relationship, (2) schemas field type change, (3) CRUD/route `.field` → `.field_id` replacement. Patterns 1, 3, 4 continue to return `extra_files=[]` (local fixes, no rename). Adds `_files_referencing_field()` helper and 11 new tests (6 `TestFilesReferencingField`, 5 `TestFKRepairScope`). **Benchmark results restored:** inventory_api — WARNING (no change); expense_tracker — WARNING (restored from SEVERE; repair now correctly queues models.py + schemas.py + crud/expenses.py together). |
+| `c151bff` | **Deterministic API contract consistency validator** — `ProjectValidator.run()` gains a 9th check: `_check_api_contract_consistency()` scans all generated `.py` files using the `ast` module and detects seven API contract violation patterns. (A) DELETE route with `status_code=204` and `response_model` declared — HTTP 204 means no body, the `response_model` is silently ignored. (B) POST route with `status_code=204` — POST creation must return 200 or 201 with a response body. (C) CRUD-style GET/POST routes (`get_*`, `list_*`, `read_*`, `create_*`) with no `response_model` — FastAPI cannot serialize, filter, or document the response without it. (D) Route whose name implies multiple items (`list_*`, `get_all_*`, `*_all`) but whose body returns a `dict` literal. (E) Route whose name implies a single item (`get_*` without plural suffix) but whose body returns a `list` literal. (F) Route handler that catches `IntegrityError`/`UniqueViolation` but raises `HTTPException(status_code=400)` — integrity violations must return 409 Conflict. (G) Pydantic Create/Update schema has `field: str` where ORM model stores `field_id` as a FK integer column — clients submit a string but the database expects an ID. Patterns D/E introduce three new module-level helpers: `_is_list_response_model`, `_route_body_returns_dict`, `_route_body_returns_list`. Pattern G uses `_CONTRACT_SKIP_SCHEMA_KEYWORDS` to skip response/summary/aggregate schemas (e.g. `SummaryItem`) that legitimately carry human-readable string labels. Returns `(error_msg, Path)` 2-tuples for precise per-file repair targeting. Adds 22 new tests (9 `TestApiContractHelpers`, 12 `TestCheckApiContractConsistency` including SummaryItem false-positive regression test). **Benchmark results:** inventory_api — WARNING, 0 API contract violations. expense_tracker — WARNING, 0 API contract violations (SummaryItem false positive correctly suppressed by `_CONTRACT_SKIP_SCHEMA_KEYWORDS`). |
 
 ---
 
@@ -68,7 +69,7 @@ Brief (txt) → Task planner (LLM) → DeveloperAgent (generates files)
 
 ---
 
-## Validation Pipeline (8 steps)
+## Validation Pipeline (9 steps)
 
 ```
 1. python_compile           — syntax check via compileall
@@ -84,7 +85,18 @@ Brief (txt) → Task planner (LLM) → DeveloperAgent (generates files)
                               returns (error_msg, primary_file, extra_files) 3-tuples; Pattern 2
                               (field-rename) includes all referencing files in extra_files so the
                               full rename scope is queued for repair together
-   → any failure → LLM repair → re-run all 8 steps
+9. api_contract_consistency — ast scan for cross-layer API contract violations (deterministic):
+                              (A) DELETE 204 + response_model (body on No Content)
+                              (B) POST 204 (creation should return 200 or 201)
+                              (C) CRUD-style route (get_*, list_*, create_*) missing response_model
+                              (D) list-semantics route (list_*, get_all_*) body returns dict literal
+                              (E) single-item route (get_* singular) body returns list literal
+                              (F) IntegrityError/UniqueViolation caught → HTTPException(400) raised
+                                  (must be 409 Conflict)
+                              (G) Pydantic Create/Update schema has field: str where ORM has
+                                  field_id FK integer column (schema/ORM naming mismatch)
+                              response/summary/aggregate schemas skipped via _CONTRACT_SKIP_SCHEMA_KEYWORDS
+   → any failure → LLM repair → re-run all 9 steps
 ```
 
 **Step 4** fires when any enum class (inheriting from `Enum`, `PyEnum`, `IntEnum`, `StrEnum`, `Flag`, `IntFlag`, or `enum.Enum`) appears under the same name in more than one file. `schemas.py` is queued for repair; the repair prompt provides `models.py` as context so Claude replaces the duplicate class with an import.
@@ -115,18 +127,26 @@ Brief (txt) → Task planner (LLM) → DeveloperAgent (generates files)
 - `_compare_involves(cmp, name)` — checks whether a `Compare` node directly references a named variable.
 - `_has_numeric_guard(func_node, param_name)` — walks the function body for `assert param > 0` or `if param <= 0: raise/return`.
 
+**Step 9** detects cross-layer API contract violations. It returns `(error_msg, Path)` 2-tuples. The check runs in two passes: (1) collect ORM `_id` FK fields to build `orm_fk_base_names` for Pattern G, then (2) scan each file for route decorator mismatches (Patterns A–F) and schema field naming mismatches (Pattern G). Route-level checks (A–F) operate on the decorator keywords (`response_model`, `status_code`) and the function body AST. Schema-level check (G) skips classes whose names contain any of `_CONTRACT_SKIP_SCHEMA_KEYWORDS` (`"read"`, `"response"`, `"out"`, `"summary"`, `"report"`, `"detail"`, `"info"`, `"stat"`) to avoid false-positives on aggregate/read schemas like `SummaryItem`.
+
+New helpers introduced by step 9:
+- `_is_list_response_model(node)` — returns True if the AST node is `List[X]` or `list[X]`.
+- `_route_body_returns_dict(func_node)` — walks the function body for a `return {}` dict literal.
+- `_route_body_returns_list(func_node)` — walks the function body for a `return []` list literal or list comprehension.
+
 ---
 
 ## Current System Status
 
-- **Tests:** 242 passing, 0 failing
-- **`inventory_api` severity:** WARNING — no FK violations fired (LLM correctly generated FKs); dead enum caught and removed; numeric constraints met. Remaining warnings: concurrency race on stock mutations, unhandled ValueError, datetime handling.
-- **`expense_tracker` severity:** WARNING (restored from SEVERE). Step 8 fires on `Expense.category = Column(String)` (Category model exists), repair now correctly queues models.py + schemas.py + crud/expenses.py together, propagating the rename consistently. No cross-file inconsistency after repair.
+- **Tests:** 264 passing, 0 failing
+- **`inventory_api` severity:** WARNING — no FK violations fired; dead enum occasionally caught by step 5 and repaired; no API contract violations. Remaining warnings: concurrency race on stock mutations, SQLAlchemy deprecation import, datetime handling.
+- **`expense_tracker` severity:** WARNING — step 8 catches `Expense.category` FK mismatch and repairs consistently across models + schemas + CRUD; step 9 found 0 API contract violations (SummaryItem false positive suppressed correctly).
 - **Structural pipeline failures:** None.
 - **Framework API issues:** Eliminated (Pydantic v2 enforced; deprecated datetime patterns removed).
-- **Enum consistency:** Deterministic. Duplicate definitions and dead variants are caught by steps 4–5.
+- **Enum consistency:** Deterministic. Steps 4–5 catch duplicate definitions and dead variants.
 - **Numeric constraints:** Deterministic. Step 6 enforces `Field(gt=0)` / `Field(ge=0)` per field category and guards on internal helper parameters.
-- **Referential integrity:** Deterministic. Step 8 catches FK violations at model, association table, and relationship levels. Pattern 2 (field-rename) repairs are dependency-aware — all referencing files are queued together.
+- **Referential integrity:** Deterministic. Step 8 catches FK violations at model, association table, and relationship levels. Pattern 2 repairs are dependency-aware.
+- **API contract consistency:** Deterministic. Step 9 catches DELETE/POST status code mismatches, missing response_model on CRUD routes, list/dict return shape mismatches, IntegrityError→400 errors, and schema/ORM FK naming mismatches.
 - **Reviewer noise:** Eliminated for both inventory and expense domains.
 
 ---
@@ -147,27 +167,30 @@ All generated APIs expose all endpoints publicly. Authentication is a brief-leve
 ## Recommended Next Steps
 
 ### 1. FK existence-check validator
-Add an AST check that verifies `ForeignKey("tablename.id")` references use real table names from the same project. Currently the validator only ensures a `ForeignKey(...)` call is present — not that the target table exists. A mismatch would cause a runtime `OperationalError` on first connect.
+Add an AST check that verifies `ForeignKey("tablename.id")` references use real table names from the same project. Currently the validator ensures `ForeignKey(...)` is present — not that the target table exists. A mismatch causes a runtime `OperationalError` on first connect. Detection: parse the string argument of each `ForeignKey(...)` call and confirm the table prefix matches a `__tablename__` attribute in any ORM model.
 
-### 2. API contract consistency validator
-Add an AST check comparing route `response_model` schemas against the actual fields returned by their CRUD functions. Flag routes where the response schema declares fields the CRUD function never populates (absent eager loads, missing columns). Queue the CRUD file for repair to add `joinedload`/`selectinload`.
+### 2. Atomic stock mutation / concurrency validator
+Add an AST detector for read-modify-write patterns on numeric fields (`stock_quantity`, `balance`, `count`) without an atomic SQL UPDATE with a WHERE guard. The tell: a CRUD function reads a field, branches on its value, then updates it in separate statements. Flag the CRUD file for repair to replace with `UPDATE ... SET field = field + :delta WHERE id = :id`.
 
-### 3. Atomic stock mutation / concurrency validator
-Add an AST detector for read-modify-write patterns on numeric fields (`stock_quantity`, `balance`, `count`) without an atomic SQL UPDATE with a WHERE guard. Flag the CRUD file for repair to replace the two-step read-then-write with a single `UPDATE ... WHERE stock_quantity >= :qty`.
+### 3. Response_model completeness expansion
+Extend step 9 Pattern C: when a route has `response_model=SchemaWithRelationships`, check whether the CRUD function uses `joinedload`/`selectinload` for the nested fields the schema declares. Flag routes where the ORM query is missing the required eager load and queue the CRUD file for repair.
 
-### 4. Response_model completeness validator
-Add an AST check: scan FastAPI route definitions for endpoints whose `response_model` schema references nested relationships. Flag routes where the corresponding CRUD function does not use `joinedload` or `selectinload` for those relationships.
+### 4. Semantic dependency graph repair expansion
+Generalise `_files_referencing_field()` into a full symbol-rename dependency graph. Given any renamed field, function, or class, walk all project files and return the complete transitive repair set. Apply to FK field renames, schema class renames, and CRUD function signature changes.
 
-### 5. Semantic dependency graph repair expansion
-Extend `_files_referencing_field()` into a general dependency graph helper that, given any renamed symbol, walks all project files and returns the full transitive repair set. Apply this to all repair patterns that involve cross-file symbol renames (not just FK field renames).
+### 5. Auth/security validator layer
+Add a lightweight AST check that flags publicly exposed endpoints (no `Depends(get_current_user)` or similar) and destructive operations (DELETE, PUT without auth guard). Severity: WARNING rather than blocking repair — auth gaps are brief-level gaps, but surfacing them deterministically would move them out of the reviewer's probabilistic findings.
+
+### 6. README/documentation sync validator (optional)
+After repair runs, detect cases where the generated README documents endpoints or status codes that no longer exist in the route files. Flag README for re-generation so documentation stays in sync with the actual API surface.
 
 ---
 
 ## Current Trajectory
 
-The pipeline has made three significant architectural maturity steps: **from prompt-only quality control to deterministic static validation with automatic repair**. Duplicate enum definitions (step 4), dead enum variants (step 5), and numeric constraint consistency (step 6) are all caught by no-LLM, no-false-negative AST scans that fire reliably on every run. The downstream repair flow is already wired — each new static check only needs a detection rule and a structured error message; no new repair infrastructure is required.
+The pipeline has progressed through three distinct maturity phases: **syntax validation → structural repair → semantic cross-layer consistency enforcement**. The earliest deterministic steps (4–5) caught intra-file enum problems. Steps 6–7 extended that to schema-level numeric and domain constraints. Steps 8–9 now enforce correctness *across* file boundaries: referential integrity ensures ORM relationships are wired correctly; API contract consistency ensures the route layer, schema layer, and ORM layer agree on field names, status codes, and return shapes.
 
-The validator layer is now the central quality gate. The pattern is established: identify a class of probabilistic prompt rule failures, write an AST check that detects it deterministically, wire it as a new pipeline step, and return the exact file path for targeted repair. Each migration unconditionally eliminates a class of reviewer findings and reduces dependency on LLM compliance. Step 6 introduced a refinement over steps 4–5: it returns `(error_msg, Path)` pairs instead of plain strings, allowing precise per-file repair targeting rather than heuristic file selection.
+The downstream repair flow handles all new steps automatically — each new check only needs a detection rule and a structured error message with the violating file path. No new repair infrastructure has been required since step 6.
 
 The quality control layers now stack as follows:
 
@@ -180,11 +203,12 @@ The quality control layers now stack as follows:
 | Numeric field constraints | `_check_numeric_constraints()` AST scan | Deterministic |
 | Audit-trail bypasses | `_check_audit_trail_bypasses()` AST scan | Deterministic |
 | Referential integrity | `_check_referential_integrity()` AST scan | Deterministic |
+| API contract consistency | `_check_api_contract_consistency()` AST scan | Deterministic |
 | Framework API correctness | Pydantic v2 prompt rules + reviewer enforcement | Probabilistic (high) |
 | Domain validation | Semantic prompt rules (cascade, datetime) | Probabilistic (medium) |
 | Semantic/concurrency | Reviewer LLM findings | Probabilistic (lower) |
 
-The validator layer now has 5 deterministic AST steps. The project is evolving from single-file repair toward dependency-aware graph repair: `_files_referencing_field()` establishes the pattern of scanning for cross-file symbol references before queuing repair targets. The natural next extension is generalising this into a full dependency graph helper for any renamed symbol, making repair scope relationship-aware rather than file-heuristic.
+The validator now has 6 deterministic AST steps (4–9). The project is evolving from syntax-level checking toward full cross-layer semantic consistency: step 9 is the first validator step that reasons about contracts *between* the route layer, schema layer, and ORM layer simultaneously. The natural next steps are FK existence validation (confirming FK target tables exist) and response_model completeness (confirming CRUD queries eager-load nested schema fields), which require the same cross-file reference scanning pattern already established by `_files_referencing_field()` and `orm_fk_base_names`.
 
 ---
 
@@ -193,12 +217,12 @@ The validator layer now has 5 deterministic AST steps. The project is evolving f
 ```
 agents/developer.py           — SYSTEM_PROMPT (13 API + 5 semantic + 5 Pydantic v2 + 4 DB enum + 4 single-source rules), filename mapper
 agents/reviewer.py            — LLM review, truncation + Pydantic + DB enum + single-source reviewer instructions
-core/validator.py             — 8-step validator: compileall, pip install, import check, duplicate enum, dead enum, numeric constraints, audit-trail bypass, referential integrity + LLM repair
+core/validator.py             — 9-step validator: compileall, pip install, import check, duplicate enum, dead enum, numeric constraints, audit-trail bypass, referential integrity, API contract consistency + LLM repair
 core/task_generator.py        — planner system prompt (FLAT LAYOUT rules)
 tests/test_developer.py       — 100 tests (filename mapper, prompt rules, all 31 system prompt rules)
 tests/test_reviewer.py        — 23 tests (truncation + Pydantic + DB enum + single-source reviewer prompt tests)
 tests/test_task_generator.py  — 7 tests (planner prompt coverage)
-tests/test_validator_strip.py — 112 tests (fence stripping + enum helpers + numeric constraint helpers + audit helpers + referential integrity helpers + FK repair scope helpers)
+tests/test_validator_strip.py — 140 tests (fence stripping + enum helpers + numeric constraint helpers + audit helpers + referential integrity helpers + FK repair scope helpers + API contract helpers)
 briefs/                       — expense_tracker, url_shortener, todo_api, blog_api, inventory_api
 memory/sessions/              — JSON session records for all past runs
 memory/reports/               — markdown review reports
@@ -211,7 +235,7 @@ The project documentation was reorganised. The new authoritative human-readable 
 | File | Role |
 |---|---|
 | `docs/VISION.md` | What NeuralOptima is, long-term goal, philosophy, non-goals |
-| `docs/ARCHITECTURE.md` | Pipeline flow, agent roles, all 8 validation steps, quality layer table, project structure |
+| `docs/ARCHITECTURE.md` | Pipeline flow, agent roles, all 9 validation steps, quality layer table, project structure |
 | `docs/HANDOFF.md` | Active sprint state (this file) |
 | `CLAUDE.md` | Claude Code CLI working rules — auto-loaded by the CLI |
 
