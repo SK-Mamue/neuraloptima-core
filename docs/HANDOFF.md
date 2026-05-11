@@ -2,8 +2,8 @@
 
 **Date:** 2026-05-11  
 **Branch:** `master` — clean, in sync with `origin/master`  
-**Last commit:** `a277084` Validate dead enum variants  
-**Test suite:** 162 tests, all passing
+**Last commit:** `35be98a` Validate numeric constraint consistency  
+**Test suite:** 188 tests, all passing
 
 ---
 
@@ -35,6 +35,7 @@ Brief (txt) → Task planner (LLM) → DeveloperAgent (generates files)
 | `b8cf583` | **Enum single-source rules** — New `ENUM SINGLE-SOURCE-OF-TRUTH RULES` section in `SYSTEM_PROMPT`: define each enum exactly once in models.py; schemas.py must import, never redefine; same imported class object required for both `Column(Enum(...))` and Pydantic field. Reviewer prompt gains an `ENUM SINGLE-SOURCE-OF-TRUTH` block. Adds 3 developer + 1 reviewer prompt tests. |
 | `0b2f9a0` | **Deterministic duplicate enum validator** — `ProjectValidator.run()` gains a 4th check: `_check_duplicate_enums()` scans all generated `.py` files with the `ast` module, detects class names inheriting from any Enum base appearing in more than one file, and fails validation with a message naming the class, both files, and the required fix. Duplicate detection queues `schemas.py` for LLM repair; the repair receives `models.py` as context and replaces the duplicate class definition with `from models import EnumName`. Adds 9 new tests (5 for `_enum_class_names`, 4 for `_check_duplicate_enums`). |
 | `a277084` | **Deterministic dead enum variant validator** — `ProjectValidator.run()` gains a 5th check: `_check_dead_enum_variants()` scans all generated `.py` files with the `ast` module, collects each enum member (via new `_enum_members()` helper), then scans all other project files (via new `_references_member_in_files()` helper) for attribute access (`EnumClass.MEMBER`) or exact string constant (`"value"`) references. Members with zero external references are flagged as dead variants. Detection queues `models.py` for LLM repair so the unused member is removed. Adds 19 new tests (5 `TestEnumMembers`, 7 `TestReferencesMemberInFiles`, 7 `TestCheckDeadEnumVariants`). Verified on `inventory_api`: `MovementType.adjustment` detected and removed by repair; dead enum warning eliminated. |
+| `35be98a` | **Deterministic numeric constraint validator** — `ProjectValidator.run()` gains a 6th check: `_check_numeric_constraints()` scans all generated `.py` files for two violation classes. (1) Schema fields: `AnnAssign` nodes in non-read Pydantic classes are checked against field-category rules — `quantity`/`amount` must have `Field(gt=0)`; `stock_quantity`/`count`/`balance` accept `Field(ge=0)` or `Field(gt=0)`; `price`/`cost`/`rate`/`total`/`subtotal` must have `Field(gt=0)`. `Optional` fields and `PositiveInt`/`PositiveFloat` annotations are skipped. Read/Response/Out classes are skipped entirely. (2) Function parameters: module-level (non-route-handler) functions with a raw `quantity: int` or `amount: int` parameter are required to have a zero/negative guard (`if param <= 0: raise` or `assert param > 0`). Unlike previous checks, returns `(error_msg, Path)` pairs so the exact violating file is queued for repair. Adds 5 new helpers (`_field_numeric_constraint`, `_is_optional_annotation`, `_is_route_handler`, `_compare_involves`, `_has_numeric_guard`) and 26 new tests (6 `TestFieldNumericConstraint`, 6 `TestHasNumericGuard`, 14 `TestCheckNumericConstraints`). Verified on `inventory_api`: LLM generated correct constraints; validator stayed silent as expected safety net. |
 
 ---
 
@@ -61,18 +62,20 @@ Brief (txt) → Task planner (LLM) → DeveloperAgent (generates files)
 | Enum serialization | `MovementType.RESTOCK` serialized as enum object, not string `"RESTOCK"` | `use_enum_values=True` required in `ConfigDict`; `(str, PyEnum)` base ensures string-compatible values |
 | DB-level enum enforcement | `movement_type = Column(String)` — invalid values persisted without constraint | `Column(Enum(MovementType))` required; SQLAlchemy generates CHECK constraint on SQLite |
 | Duplicate enum definitions | `MovementType` defined independently in models.py and schemas.py — latent divergence risk | `_check_duplicate_enums()` in validator detects and fails; LLM repair rewrites schemas.py to import from models.py |
+| Numeric field constraints | `quantity`/`price` fields accepted without bounds; internal helpers accepted negative quantities silently | `_check_numeric_constraints()` enforces `Field(gt=0)` / `Field(ge=0)` per field category; flags module-level helpers missing zero/negative guards |
 
 ---
 
-## Validation Pipeline (5 steps)
+## Validation Pipeline (6 steps)
 
 ```
-1. python_compile   — syntax check via compileall
-2. pip_install      — install requirements.txt so import check resolves deps
-3. app_import_check — import all generated modules; catch missing deps / circular imports
-4. duplicate_enum   — ast scan for enum class names defined in more than one file (deterministic)
-5. dead_enum        — ast scan for enum members with no external references (deterministic)
-   → any failure → LLM repair → re-run all 5 steps
+1. python_compile      — syntax check via compileall
+2. pip_install         — install requirements.txt so import check resolves deps
+3. app_import_check    — import all generated modules; catch missing deps / circular imports
+4. duplicate_enum      — ast scan for enum class names defined in more than one file (deterministic)
+5. dead_enum           — ast scan for enum members with no external references (deterministic)
+6. numeric_constraints — ast scan for missing or weak Field bounds and unguarded int parameters (deterministic)
+   → any failure → LLM repair → re-run all 6 steps
 ```
 
 **Step 4** fires when any enum class (inheriting from `Enum`, `PyEnum`, `IntEnum`, `StrEnum`, `Flag`, `IntFlag`, or `enum.Enum`) appears under the same name in more than one file. `schemas.py` is queued for repair; the repair prompt provides `models.py` as context so Claude replaces the duplicate class with an import.
@@ -83,30 +86,48 @@ Brief (txt) → Task planner (LLM) → DeveloperAgent (generates files)
 - `_references_member_in_files(files, member_name, member_value)` — walks the AST of each file looking for `ast.Attribute` nodes whose `.attr` matches `member_name`, or `ast.Constant` string nodes whose value matches `member_value` (case-insensitive, exact).
 - `_check_dead_enum_variants()` — combines the two helpers, builds the error string (class name, member name/value, files inspected, fix instruction), and returns all dead-member errors.
 
+**Step 6** fires on two patterns. Unlike steps 4–5, it returns `(error_msg, Path)` pairs so the exact violating file is queued for repair rather than a heuristic target.
+
+*Schema field rules* — applied to `AnnAssign` nodes in any class whose name does **not** end in `Read`, `Response`, or `Out`. `Optional` fields and `PositiveInt`/`PositiveFloat` annotations are skipped.
+
+| Field name | Required constraint | Notes |
+|---|---|---|
+| `quantity`, `amount` | `Field(gt=0)` | `ge=0` is flagged as too weak |
+| `stock_quantity`, `count`, `balance` | `Field(ge=0)` or `Field(gt=0)` | zero stock is valid |
+| `price`, `cost`, `rate`, `total`, `subtotal` | `Field(gt=0)` | monetary values cannot be zero |
+
+`Field(ge=N)` where N > 0 is treated as equivalent to `Field(gt=0)` for integers.
+
+*Function parameter rules* — applied to module-level (non-route-handler) `FunctionDef` nodes. A function is a route handler if any decorator resolves to `.get`, `.post`, `.put`, `.patch`, or `.delete`. Parameters named `quantity` or `amount` with a raw `int` or `float` annotation must have a zero/negative guard in the function body:
+
+- `_field_numeric_constraint(assign)` — reads `gt`/`ge` from `Field(...)` keyword args; returns `None` if no Field or no numeric bound.
+- `_is_optional_annotation(ann)` — detects `Optional[X]`, `Union[X, None]`, and `X | None`.
+- `_is_route_handler(func_node)` — detects HTTP method decorators.
+- `_compare_involves(cmp, name)` — checks whether a `Compare` node directly references a named variable.
+- `_has_numeric_guard(func_node, param_name)` — walks the function body for `assert param > 0` or `if param <= 0: raise/return`.
+
 ---
 
 ## Current System Status
 
-- **Tests:** 162 passing, 0 failing
-- **`inventory_api` severity:** WARNING — dead enum `MovementType.adjustment` eliminated by validator/repair; remaining issues are eager-load risks and unrelated security notes
+- **Tests:** 188 passing, 0 failing
+- **`inventory_api` severity:** WARNING — dead enum `MovementType.adjustment` caught and removed by validator/repair; LLM generated correct `Field(gt=0)` constraints so numeric validator fired no violations; remaining issues are unrelated to numeric constraints or enum structure
 - **`expense_tracker` severity:** WARNING — 3 bugs; FK referential integrity, status code mismatch, minor code quality
 - **Structural pipeline failures:** None.
 - **Framework API issues:** Eliminated (Pydantic v2 enforced; deprecated datetime patterns removed).
-- **Enum consistency:** Significantly hardened. Duplicate definitions and dead variants are both caught by the static validator and repaired before the reviewer runs.
+- **Enum consistency:** Deterministic. Duplicate definitions and dead variants are caught by steps 4–5 and repaired before the reviewer runs.
+- **Numeric constraints:** Deterministic. Step 6 enforces `Field(gt=0)` / `Field(ge=0)` per field category and guards on internal helper parameters.
 - **Reviewer noise:** Eliminated. All reported findings are real code issues.
 
 ---
 
 ## Remaining Known Limitations
 
-### Quantity constraint inconsistency
-`StockMovementRead.quantity` uses `Field(ge=0)` (allows zero) while `RestockRequest.quantity` and `SellRequest.quantity` use `Field(gt=0)` (rejects zero). A zero-quantity movement cannot be created through the public API, but a direct DB insert would pass the read schema. Minor inconsistency; validator rule pending.
-
 ### TOCTOU race on stock mutations
 The sell and restock endpoints read stock quantity, check sufficiency, then write — without a row-level lock. Concurrent requests can both pass the check before either commits, producing negative stock. This requires an atomic `UPDATE ... WHERE stock_quantity >= :qty` pattern or a version counter; SQLite does not support `SELECT FOR UPDATE`.
 
-### Internal `add_stock_movement` accepts unsafe quantities
-`add_stock_movement()` applies an adjustment branch (`product.stock_quantity += quantity`) reachable only by internal callers, not the public API. A negative internal call bypasses the `gt=0` constraint and could silently corrupt stock. Fix: add an assertion or explicit guard inside the function.
+### Internal helpers without quantity guards
+Module-level CRUD helpers that accept raw `quantity: int` without a `if quantity <= 0: raise` guard can silently corrupt stock if called by internal paths that bypass the public API validation. Step 6 now flags these deterministically.
 
 ### Missing FK/domain-level referential integrity
 `Expense.category` is a plain `String` with no `ForeignKey` to the `Category` table. Expenses can reference non-existent categories; category renames do not cascade.
@@ -118,28 +139,28 @@ All generated APIs expose all endpoints publicly. Authentication is a brief-leve
 
 ## Recommended Next Steps
 
-### 1. Validator: quantity constraint consistency
-Add an AST check: scan Pydantic schemas for numeric fields named `quantity`, `amount`, `count`, `stock`, `price`. Flag any that are missing `ge=0` or `gt=0` in their `Field(...)` call. Trigger targeted repair for each violation.
-
-### 2. Validator: audit-trail bypass detection
+### 1. Validator: audit-trail bypass detection
 Add an AST check: if a `StockMovement` or similar history model exists, flag any Update schema (class names ending in `Update`) that contains a field matching the audited column (e.g. `stock_quantity`). Trigger repair to remove the field from the Update schema.
 
-### 3. Validator: FK referential integrity
+### 2. Validator: FK referential integrity
 Add an AST check: scan SQLAlchemy model classes for `Column(String)` or `Column(Integer)` fields whose names end in `_id`, `_name`, or match another model's primary key. Flag fields that semantically reference another table but lack a `ForeignKey(...)` declaration.
 
-### 4. Atomic stock mutation pattern
-Add a quality rule: "Replace read-modify-write patterns on numeric fields (stock_quantity, balance, count) with a single atomic SQL UPDATE using a WHERE guard. Check affected rowcount to detect constraint violations instead of reading first."
+### 3. Atomic stock mutation / concurrency validator
+Add a quality rule: "Replace read-modify-write patterns on numeric fields (stock_quantity, balance, count) with a single atomic SQL UPDATE using a WHERE guard. Check affected rowcount to detect constraint violations instead of reading first." Or add an AST detector for the read-then-write pattern without a lock.
 
-### 5. Validator: response_model completeness
+### 4. Validator: response_model completeness
 Add an AST check: scan FastAPI route definitions for endpoints whose `response_model` schema references nested relationships. Flag routes where the corresponding CRUD function does not use `joinedload` or `selectinload` for those relationships. Trigger repair to add eager loading.
+
+### 5. README/documentation fence validator (optional)
+After repair runs, detect cases where the generated README still describes enum variants or endpoints that were removed by earlier repair steps. Flag the README for re-generation to stay in sync with the actual code.
 
 ---
 
 ## Current Trajectory
 
-The pipeline has made two significant architectural maturity steps: **from prompt-only quality control to deterministic static validation with automatic repair**. Both duplicate enum definitions (step 4) and dead enum variants (step 5) are now caught by no-LLM, no-false-negative AST scans that fire reliably on every run. The downstream repair flow is already wired — each new static check only needs a detection rule and a structured error message; no new repair infrastructure is required.
+The pipeline has made three significant architectural maturity steps: **from prompt-only quality control to deterministic static validation with automatic repair**. Duplicate enum definitions (step 4), dead enum variants (step 5), and numeric constraint consistency (step 6) are all caught by no-LLM, no-false-negative AST scans that fire reliably on every run. The downstream repair flow is already wired — each new static check only needs a detection rule and a structured error message; no new repair infrastructure is required.
 
-The validator layer is becoming the core quality gate. The pattern is now established: identify a class of probabilistic prompt rule failures, write an AST check that detects it deterministically, and wire it into the pipeline as a new step. Each migration unconditionally eliminates a class of reviewer findings and reduces dependency on LLM compliance.
+The validator layer is now the central quality gate. The pattern is established: identify a class of probabilistic prompt rule failures, write an AST check that detects it deterministically, wire it as a new pipeline step, and return the exact file path for targeted repair. Each migration unconditionally eliminates a class of reviewer findings and reduces dependency on LLM compliance. Step 6 introduced a refinement over steps 4–5: it returns `(error_msg, Path)` pairs instead of plain strings, allowing precise per-file repair targeting rather than heuristic file selection.
 
 The quality control layers now stack as follows:
 
@@ -149,11 +170,12 @@ The quality control layers now stack as follows:
 | Syntax + import validity | `compileall` + `app_import_check` | Deterministic |
 | Duplicate enum definitions | `_check_duplicate_enums()` AST scan | Deterministic |
 | Dead enum variants | `_check_dead_enum_variants()` AST scan | Deterministic |
+| Numeric field constraints | `_check_numeric_constraints()` AST scan | Deterministic |
 | Framework API correctness | Pydantic v2 prompt rules + reviewer enforcement | Probabilistic (high) |
-| Domain validation | Semantic prompt rules (`Field(ge=0)`, cascade, audit trail) | Probabilistic (medium) |
+| Domain validation | Semantic prompt rules (cascade, audit trail) | Probabilistic (medium) |
 | Semantic/concurrency | Reviewer LLM findings | Probabilistic (lower) |
 
-The clear next step is to continue migrating the medium-reliability probabilistic rules (quantity constraints, audit-trail bypass, FK integrity) into the deterministic validator layer.
+The clear next step is to continue migrating the remaining medium-reliability probabilistic rules (audit-trail bypass, FK integrity, concurrency) into the deterministic validator layer.
 
 ---
 
@@ -162,12 +184,12 @@ The clear next step is to continue migrating the medium-reliability probabilisti
 ```
 agents/developer.py           — SYSTEM_PROMPT (13 API + 5 semantic + 5 Pydantic v2 + 4 DB enum + 4 single-source rules), filename mapper
 agents/reviewer.py            — LLM review, truncation + Pydantic + DB enum + single-source reviewer instructions
-core/validator.py             — 5-step validator: compileall, pip install, import check, duplicate enum AST scan, dead enum AST scan + LLM repair
+core/validator.py             — 6-step validator: compileall, pip install, import check, duplicate enum, dead enum, numeric constraints + LLM repair
 core/task_generator.py        — planner system prompt (FLAT LAYOUT rules)
 tests/test_developer.py       — 100 tests (filename mapper, prompt rules, all 31 system prompt rules)
 tests/test_reviewer.py        — 23 tests (truncation + Pydantic + DB enum + single-source reviewer prompt tests)
 tests/test_task_generator.py  — 7 tests (planner prompt coverage)
-tests/test_validator_strip.py — 39 tests (fence stripping + _enum_class_names + _check_duplicate_enums + _enum_members + _references_member_in_files + _check_dead_enum_variants)
+tests/test_validator_strip.py — 65 tests (fence stripping + _enum_class_names + _check_duplicate_enums + _enum_members + _references_member_in_files + _check_dead_enum_variants + _field_numeric_constraint + _has_numeric_guard + _check_numeric_constraints)
 briefs/                       — expense_tracker, url_shortener, todo_api, blog_api, inventory_api
 memory/sessions/              — JSON session records for all past runs
 memory/reports/               — markdown review reports
@@ -181,7 +203,7 @@ cd /opt/agent-lab/projects/neuraloptima-core
 # Tests
 PYTHONPATH=. .venv/bin/pytest -q
 
-# Smoke run (watch for "Validation failed — attempting repair" on dead/duplicate enum variants)
+# Smoke run (watch for "Validation failed — attempting repair" on enum/constraint violations)
 .venv/bin/python cli.py run briefs/inventory_api.txt
 
 # Git
