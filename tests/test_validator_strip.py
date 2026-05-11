@@ -15,9 +15,12 @@ from core.validator import (
     _has_numeric_guard,
     _history_model_names,
     _is_generic_update_func,
+    _is_list_response_model,
     _is_orm_model_class_base,
     _references_member_in_files,
     _relationship_target,
+    _route_body_returns_dict,
+    _route_body_returns_list,
     _strip_fences,
 )
 
@@ -1430,3 +1433,334 @@ class TestFKRepairScope:
         assert "category" in msg           # old field name stated
         assert "schemas" in msg.lower()    # schemas mentioned
         assert "crud" in msg.lower() or "route" in msg.lower()  # CRUD/routes mentioned
+
+
+# ── _is_list_response_model / _route_body_returns_* ──────────────────────────
+
+import ast as _ast3
+
+
+def _parse_expr(src: str) -> _ast3.expr:
+    return _ast3.parse(src, mode="eval").body
+
+
+class TestApiContractHelpers:
+    def test_list_subscript_detected(self):
+        node = _parse_expr("List[ItemRead]")
+        assert _is_list_response_model(node) is True
+
+    def test_lowercase_list_subscript_detected(self):
+        node = _parse_expr("list[ItemRead]")
+        assert _is_list_response_model(node) is True
+
+    def test_plain_name_not_list(self):
+        node = _parse_expr("ItemRead")
+        assert _is_list_response_model(node) is False
+
+    def test_optional_not_list(self):
+        node = _parse_expr("Optional[ItemRead]")
+        assert _is_list_response_model(node) is False
+
+    def test_route_body_returns_dict_true(self):
+        fn = _parse_func("""\
+            async def get_items():
+                return {}
+        """)
+        assert _route_body_returns_dict(fn) is True
+
+    def test_route_body_returns_dict_false_for_list(self):
+        fn = _parse_func("""\
+            async def get_items():
+                return []
+        """)
+        assert _route_body_returns_dict(fn) is False
+
+    def test_route_body_returns_list_true(self):
+        fn = _parse_func("""\
+            async def get_item():
+                return []
+        """)
+        assert _route_body_returns_list(fn) is True
+
+    def test_route_body_returns_list_comprehension(self):
+        fn = _parse_func("""\
+            async def list_items():
+                return [x for x in items]
+        """)
+        assert _route_body_returns_list(fn) is True
+
+    def test_route_body_returns_list_false_for_dict(self):
+        fn = _parse_func("""\
+            async def get_item():
+                return {}
+        """)
+        assert _route_body_returns_list(fn) is False
+
+
+# ── _check_api_contract_consistency ──────────────────────────────────────────
+
+class TestCheckApiContractConsistency:
+    def _make_validator(self, tmp_path: Path, files: dict[str, str]):
+        from core.logger import Logger
+        from core.models import OutputType, ProjectBrief, Session
+        from core.validator import ProjectValidator
+        for fname, content in files.items():
+            p = tmp_path / fname
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+        brief = ProjectBrief(
+            title="T", description="d", output_type=OutputType.API,
+            tech_stack=[], requirements=[], project_dir=str(tmp_path),
+        )
+        session = Session(brief=brief)
+        return ProjectValidator(tmp_path, session, Logger(session.id))
+
+    # ── Required test cases ──────────────────────────────────────────────────
+
+    def test_integrity_error_raises_400_fails(self, tmp_path):
+        """Route catches IntegrityError but raises 400 — should be 409 Conflict."""
+        v = self._make_validator(tmp_path, {
+            "routes.py": textwrap.dedent("""\
+                from fastapi import APIRouter, HTTPException
+                from sqlalchemy.exc import IntegrityError
+                router = APIRouter()
+                @router.post("/items/", response_model=dict)
+                async def create_item(db):
+                    try:
+                        db.commit()
+                    except IntegrityError:
+                        raise HTTPException(status_code=400, detail="Duplicate")
+            """),
+        })
+        pairs = v._check_api_contract_consistency()
+        msgs = [m for m, _ in pairs]
+        assert any("400" in m and "409" in m for m in msgs)
+
+    def test_delete_204_with_response_model_fails(self, tmp_path):
+        """DELETE 204 + response_model is a contract contradiction."""
+        v = self._make_validator(tmp_path, {
+            "routes.py": textwrap.dedent("""\
+                from fastapi import APIRouter
+                router = APIRouter()
+                @router.delete("/items/{item_id}", status_code=204, response_model=dict)
+                async def delete_item(item_id: int, db):
+                    pass
+            """),
+        })
+        pairs = v._check_api_contract_consistency()
+        msgs = [m for m, _ in pairs]
+        assert any("204" in m and "delete_item" in m for m in msgs)
+
+    def test_post_without_response_model_fails(self, tmp_path):
+        """CRUD-style POST route with no response_model declared."""
+        v = self._make_validator(tmp_path, {
+            "routes.py": textwrap.dedent("""\
+                from fastapi import APIRouter
+                router = APIRouter()
+                @router.post("/items/")
+                async def create_item(db):
+                    pass
+            """),
+        })
+        pairs = v._check_api_contract_consistency()
+        msgs = [m for m, _ in pairs]
+        assert any("create_item" in m and "response_model" in m for m in msgs)
+
+    def test_category_str_field_with_orm_category_id_fails(self, tmp_path):
+        """Schema has category: str but ORM has category_id FK → mismatch."""
+        v = self._make_validator(tmp_path, {
+            "models.py": textwrap.dedent("""\
+                from sqlalchemy import Column, Integer, ForeignKey
+                from database import Base
+                class Category(Base):
+                    __tablename__ = "categories"
+                    id = Column(Integer, primary_key=True)
+                class Expense(Base):
+                    __tablename__ = "expenses"
+                    id = Column(Integer, primary_key=True)
+                    category_id = Column(Integer, ForeignKey("categories.id"))
+            """),
+            "schemas.py": textwrap.dedent("""\
+                from pydantic import BaseModel
+                class ExpenseCreate(BaseModel):
+                    category: str
+                    amount: float
+            """),
+        })
+        pairs = v._check_api_contract_consistency()
+        msgs = [m for m, _ in pairs]
+        assert any("category" in m and "category_id" in m for m in msgs)
+
+    def test_valid_crud_api_contract_passes(self, tmp_path):
+        """Well-formed CRUD routes with correct status codes and response_models."""
+        v = self._make_validator(tmp_path, {
+            "routes.py": textwrap.dedent("""\
+                from fastapi import APIRouter
+                from typing import List
+                router = APIRouter()
+                @router.get("/items/", response_model=List[dict])
+                async def list_items(db):
+                    return []
+                @router.post("/items/", response_model=dict, status_code=201)
+                async def create_item(db):
+                    return {}
+                @router.delete("/items/{item_id}", status_code=204)
+                async def delete_item(item_id: int, db):
+                    pass
+            """),
+        })
+        pairs = v._check_api_contract_consistency()
+        assert pairs == []
+
+    def test_list_route_returning_dict_fails(self, tmp_path):
+        """list_items route returns dict literal — should return a list."""
+        v = self._make_validator(tmp_path, {
+            "routes.py": textwrap.dedent("""\
+                from fastapi import APIRouter
+                router = APIRouter()
+                @router.get("/items/")
+                async def list_items(db):
+                    return {}
+            """),
+        })
+        pairs = v._check_api_contract_consistency()
+        msgs = [m for m, _ in pairs]
+        assert any("list_items" in m or "dict" in m.lower() for m in msgs)
+
+    def test_single_route_returning_list_fails(self, tmp_path):
+        """get_item route returns list literal — should return a single object."""
+        v = self._make_validator(tmp_path, {
+            "routes.py": textwrap.dedent("""\
+                from fastapi import APIRouter
+                router = APIRouter()
+                @router.get("/items/{item_id}", response_model=dict)
+                async def get_item(item_id: int, db):
+                    return []
+            """),
+        })
+        pairs = v._check_api_contract_consistency()
+        msgs = [m for m, _ in pairs]
+        assert any("get_item" in m or "list" in m.lower() for m in msgs)
+
+    # ── Additional edge cases ────────────────────────────────────────────────
+
+    def test_post_204_fails(self, tmp_path):
+        """POST with status_code=204 should be 200 or 201."""
+        v = self._make_validator(tmp_path, {
+            "routes.py": textwrap.dedent("""\
+                from fastapi import APIRouter
+                router = APIRouter()
+                @router.post("/items/", status_code=204)
+                async def create_item(db):
+                    pass
+            """),
+        })
+        pairs = v._check_api_contract_consistency()
+        msgs = [m for m, _ in pairs]
+        assert any("204" in m and "create_item" in m for m in msgs)
+
+    def test_delete_204_without_response_model_passes(self, tmp_path):
+        """DELETE 204 with no response_model is valid (intended No Content)."""
+        v = self._make_validator(tmp_path, {
+            "routes.py": textwrap.dedent("""\
+                from fastapi import APIRouter
+                router = APIRouter()
+                @router.delete("/items/{item_id}", status_code=204)
+                async def delete_item(item_id: int, db):
+                    pass
+            """),
+        })
+        pairs = v._check_api_contract_consistency()
+        # DELETE 204 without response_model is fine
+        assert not any("delete_item" in m for m, _ in pairs)
+
+    def test_integrity_error_raises_409_passes(self, tmp_path):
+        """Route correctly raises 409 for IntegrityError — no violation."""
+        v = self._make_validator(tmp_path, {
+            "routes.py": textwrap.dedent("""\
+                from fastapi import APIRouter, HTTPException
+                from sqlalchemy.exc import IntegrityError
+                router = APIRouter()
+                @router.post("/items/", response_model=dict, status_code=201)
+                async def create_item(db):
+                    try:
+                        db.commit()
+                    except IntegrityError:
+                        raise HTTPException(status_code=409, detail="Conflict")
+            """),
+        })
+        pairs = v._check_api_contract_consistency()
+        assert pairs == []
+
+    def test_error_message_contains_required_fields(self, tmp_path):
+        """Error message must include file path, route name, issue, and fix hint."""
+        v = self._make_validator(tmp_path, {
+            "routes.py": textwrap.dedent("""\
+                from fastapi import APIRouter, HTTPException
+                from sqlalchemy.exc import IntegrityError
+                router = APIRouter()
+                @router.post("/items/", response_model=dict)
+                async def create_item(db):
+                    try:
+                        db.commit()
+                    except IntegrityError:
+                        raise HTTPException(status_code=400, detail="Bad")
+            """),
+        })
+        pairs = v._check_api_contract_consistency()
+        assert pairs
+        msg, path = pairs[0]
+        assert "routes.py" in msg       # file path
+        assert "create_item" in msg     # route name
+        assert "400" in msg             # detected issue
+        assert "409" in msg             # expected fix
+        assert path.name == "routes.py" # correct file queued
+
+    def test_read_schema_with_category_str_not_flagged(self, tmp_path):
+        """Response/Read schemas with category: str are not flagged (they may denote names)."""
+        v = self._make_validator(tmp_path, {
+            "models.py": textwrap.dedent("""\
+                from sqlalchemy import Column, Integer, ForeignKey
+                from database import Base
+                class Category(Base):
+                    __tablename__ = "categories"
+                    id = Column(Integer, primary_key=True)
+                class Expense(Base):
+                    __tablename__ = "expenses"
+                    id = Column(Integer, primary_key=True)
+                    category_id = Column(Integer, ForeignKey("categories.id"))
+            """),
+            "schemas.py": textwrap.dedent("""\
+                from pydantic import BaseModel
+                class ExpenseRead(BaseModel):
+                    category: str
+            """),
+        })
+        pairs = v._check_api_contract_consistency()
+        # ExpenseRead is a read schema — skipped
+        assert not any("ExpenseRead" in m for m, _ in pairs)
+
+    def test_summary_schema_with_category_str_not_flagged(self, tmp_path):
+        """Aggregate/summary schemas (SummaryItem) with category: str are not flagged."""
+        v = self._make_validator(tmp_path, {
+            "models.py": textwrap.dedent("""\
+                from sqlalchemy import Column, Integer, ForeignKey
+                from database import Base
+                class Category(Base):
+                    __tablename__ = "categories"
+                    id = Column(Integer, primary_key=True)
+                class Expense(Base):
+                    __tablename__ = "expenses"
+                    id = Column(Integer, primary_key=True)
+                    category_id = Column(Integer, ForeignKey("categories.id"))
+            """),
+            "schemas.py": textwrap.dedent("""\
+                from pydantic import BaseModel
+                class SummaryItem(BaseModel):
+                    category: str
+                    total: float
+            """),
+        })
+        pairs = v._check_api_contract_consistency()
+        # SummaryItem contains "summary" — skipped as a response/aggregate schema
+        assert not any("SummaryItem" in m for m, _ in pairs)

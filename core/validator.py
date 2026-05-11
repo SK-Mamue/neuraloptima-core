@@ -101,6 +101,12 @@ class ProjectValidator:
                 if f.exists():
                     failed.add(f)
 
+        # 9) API contract consistency check — deterministic; no LLM call needed
+        for msg, src_file in self._check_api_contract_consistency():
+            errors.append(msg)
+            if src_file.exists():
+                failed.add(src_file)
+
         if errors:
             self.logger.warning(
                 event="validation_failed",
@@ -670,6 +676,244 @@ class ProjectValidator:
 
         return results
 
+    def _check_api_contract_consistency(self) -> list[tuple[str, Path]]:
+        """
+        Return (error_msg, file_path) pairs for API contract violations in route files.
+
+        Pattern A — DELETE route with status_code=204 and response_model declared
+        Pattern B — POST route with status_code=204 (POST should return 200 or 201)
+        Pattern C — CRUD-style GET/POST route missing response_model
+        Pattern D — List-semantics route (name implies multiple) body returns dict literal
+        Pattern E — Single-item route body returns list literal
+        Pattern F — IntegrityError caught but HTTPException(status_code=400) raised (should be 409)
+        Pattern G — Pydantic schema field is plain str where ORM uses an _id FK column
+        """
+        _SKIP = {"__pycache__", ".venv", ".git"}
+        all_py: list[Path] = [
+            f for f in sorted(self.project_dir.rglob("*.py"))
+            if not any(part in _SKIP for part in f.relative_to(self.project_dir).parts)
+        ]
+
+        # Pattern G prep: collect base names of ORM _id FK fields (e.g. "category" from
+        # "category_id") so we can detect schema fields using the plain name with str type.
+        orm_fk_base_names: set[str] = set()
+        for py_file in all_py:
+            try:
+                tree = ast.parse(py_file.read_text(encoding="utf-8"))
+            except (SyntaxError, UnicodeDecodeError):
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                if not any(_is_orm_model_class_base(b) for b in node.bases):
+                    continue
+                for item in node.body:
+                    if not isinstance(item, ast.Assign):
+                        continue
+                    for target in item.targets:
+                        if isinstance(target, ast.Name) and target.id.endswith("_id"):
+                            base = target.id[:-3]
+                            if base in _FK_REFERENCE_NAMES:
+                                orm_fk_base_names.add(base)
+
+        results: list[tuple[str, Path]] = []
+
+        for py_file in all_py:
+            rel_str = str(py_file.relative_to(self.project_dir))
+            try:
+                tree = ast.parse(py_file.read_text(encoding="utf-8"))
+            except (SyntaxError, UnicodeDecodeError):
+                continue
+
+            # Pattern G: schema class has plain-name str field where ORM uses _id
+            if orm_fk_base_names:
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.ClassDef):
+                        continue
+                    if any(_is_orm_model_class_base(b) for b in node.bases):
+                        continue  # skip ORM models
+                    if any(kw in node.name.lower() for kw in _CONTRACT_SKIP_SCHEMA_KEYWORDS):
+                        continue  # skip read/response/summary schemas
+                    has_model_base = any(
+                        (isinstance(b, ast.Name) and "Model" in b.id)
+                        or (isinstance(b, ast.Attribute) and "Model" in b.attr)
+                        for b in node.bases
+                    )
+                    if not has_model_base:
+                        continue
+                    for item in node.body:
+                        if not isinstance(item, ast.AnnAssign):
+                            continue
+                        if not isinstance(item.target, ast.Name):
+                            continue
+                        field_name = item.target.id
+                        if field_name not in orm_fk_base_names:
+                            continue
+                        if not (isinstance(item.annotation, ast.Name) and item.annotation.id == "str"):
+                            continue
+                        results.append((
+                            f"API contract error in {rel_str} (class {node.name}): "
+                            f"field '{field_name}: str' uses the entity name directly "
+                            f"but the ORM model stores '{field_name}_id' as a foreign key integer. "
+                            f"The schema and ORM are inconsistent — clients submit a string "
+                            f"but the database expects an integer ID. "
+                            f"Fix: rename '{field_name}: str' to '{field_name}_id: int' "
+                            f"and update all routes and CRUD functions that reference this field.",
+                            py_file,
+                        ))
+
+            # Patterns A-F: inspect route handler functions
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+
+                is_route = False
+                for dec in node.decorator_list:
+                    if not isinstance(dec, ast.Call):
+                        continue
+                    func = dec.func
+                    if not isinstance(func, ast.Attribute):
+                        continue
+                    method = func.attr
+                    if method not in {"get", "post", "put", "patch", "delete"}:
+                        continue
+
+                    is_route = True
+                    response_model_node = None
+                    status_code = None
+                    for kw in dec.keywords:
+                        if kw.arg == "response_model":
+                            response_model_node = kw.value
+                        elif kw.arg == "status_code" and isinstance(kw.value, ast.Constant):
+                            status_code = kw.value.value
+
+                    fname_lower = node.name.lower()
+
+                    # Pattern A: DELETE + 204 + response_model (body on No Content)
+                    if method == "delete" and status_code == 204 and response_model_node is not None:
+                        results.append((
+                            f"API contract error in {rel_str} (route {node.name}): "
+                            f"DELETE route declares status_code=204 (No Content) "
+                            f"but also has response_model. "
+                            f"HTTP 204 means no response body — response_model is ignored "
+                            f"and clients receive an empty response. "
+                            f"Fix: remove response_model (keep 204) "
+                            f"or change status_code to 200.",
+                            py_file,
+                        ))
+
+                    # Pattern B: POST + 204 (wrong code for resource creation)
+                    if method == "post" and status_code == 204:
+                        results.append((
+                            f"API contract error in {rel_str} (route {node.name}): "
+                            f"POST route has status_code=204 (No Content). "
+                            f"POST routes that create resources should return 200 or 201 "
+                            f"(Created) with the created resource body. "
+                            f"Fix: change status_code to 201 and declare response_model.",
+                            py_file,
+                        ))
+
+                    # Pattern C: CRUD-style GET/POST missing response_model
+                    if (
+                        method in {"get", "post"}
+                        and response_model_node is None
+                        and status_code != 204
+                        and any(
+                            fname_lower.startswith(prefix)
+                            for prefix in ("get_", "list_", "read_", "create_")
+                        )
+                    ):
+                        results.append((
+                            f"API contract error in {rel_str} (route {node.name}): "
+                            f"{method.upper()} route has no response_model declared. "
+                            f"Without response_model FastAPI cannot serialize the response, "
+                            f"filter sensitive fields, or generate correct OpenAPI docs. "
+                            f"Fix: add response_model=<SchemaClass> to the decorator.",
+                            py_file,
+                        ))
+
+                    # Pattern D: list-name route returns dict literal
+                    looks_like_list = (
+                        fname_lower.startswith("list_")
+                        or fname_lower.startswith("get_all_")
+                        or fname_lower.endswith("_all")
+                    )
+                    if looks_like_list and _route_body_returns_dict(node):
+                        results.append((
+                            f"API contract error in {rel_str} (route {node.name}): "
+                            f"route name implies multiple items but the function body "
+                            f"returns a dict literal. "
+                            f"List routes must return a sequence (list or ORM query result). "
+                            f"Fix: return a list from the CRUD layer "
+                            f"and use response_model=List[<SchemaClass>].",
+                            py_file,
+                        ))
+
+                    # Pattern E: single-name route returns list literal
+                    looks_like_single = (
+                        not looks_like_list
+                        and fname_lower.startswith("get_")
+                        and not fname_lower.endswith("s")
+                    )
+                    if looks_like_single and _route_body_returns_list(node):
+                        results.append((
+                            f"API contract error in {rel_str} (route {node.name}): "
+                            f"route name implies a single item but the function body "
+                            f"returns a list literal. "
+                            f"Single-item routes must return one object. "
+                            f"Fix: use response_model=List[<SchemaClass>] "
+                            f"or change the CRUD function to return a single item.",
+                            py_file,
+                        ))
+
+                # Pattern F: IntegrityError caught → 400 raised (should be 409)
+                if is_route:
+                    for handler in ast.walk(node):
+                        if not isinstance(handler, ast.ExceptHandler):
+                            continue
+                        exc_type = handler.type
+                        if exc_type is None:
+                            continue
+                        exc_name = (
+                            exc_type.id if isinstance(exc_type, ast.Name)
+                            else exc_type.attr if isinstance(exc_type, ast.Attribute)
+                            else ""
+                        )
+                        if "IntegrityError" not in exc_name and "UniqueViolation" not in exc_name:
+                            continue
+                        for stmt in ast.walk(handler):
+                            if not isinstance(stmt, ast.Raise):
+                                continue
+                            if stmt.exc is None or not isinstance(stmt.exc, ast.Call):
+                                continue
+                            exc_func = stmt.exc.func
+                            exc_func_name = (
+                                exc_func.id if isinstance(exc_func, ast.Name)
+                                else exc_func.attr if isinstance(exc_func, ast.Attribute)
+                                else ""
+                            )
+                            if exc_func_name != "HTTPException":
+                                continue
+                            raised_code: int | None = None
+                            if stmt.exc.args and isinstance(stmt.exc.args[0], ast.Constant):
+                                raised_code = stmt.exc.args[0].value
+                            for kw in stmt.exc.keywords:
+                                if kw.arg == "status_code" and isinstance(kw.value, ast.Constant):
+                                    raised_code = kw.value.value
+                            if raised_code == 400:
+                                results.append((
+                                    f"API contract error in {rel_str} (route {node.name}): "
+                                    f"catches IntegrityError/UniqueViolation but raises "
+                                    f"HTTPException(status_code=400 Bad Request). "
+                                    f"Integrity violations (duplicate key, FK constraint) "
+                                    f"must return 409 Conflict, not 400 Bad Request. "
+                                    f"Fix: change status_code=400 to status_code=409.",
+                                    py_file,
+                                ))
+                    break  # avoid re-checking on multiple decorators
+
+        return results
+
     def _collect_context(self, exclude: Path) -> dict[str, str]:
         context: dict[str, str] = {}
         for p in sorted(self.project_dir.glob("*.py")):
@@ -1025,6 +1269,43 @@ def _relationship_target(call_node: ast.Call) -> str | None:
     ):
         return call_node.args[0].value
     return None
+
+
+# ── API contract consistency helpers ──────────────────────────────────────────
+
+# Schema class name keywords that indicate a response/read/aggregate schema.
+# Pattern G skips these — category: str in a SummaryItem is a JOIN-populated
+# label, not a user-supplied FK reference that needs the _id form.
+_CONTRACT_SKIP_SCHEMA_KEYWORDS = frozenset({
+    "read", "response", "out", "summary", "report", "detail", "info", "stat",
+})
+
+
+def _is_list_response_model(node: ast.expr) -> bool:
+    """Return True if the AST node represents List[X] or list[X]."""
+    if isinstance(node, ast.Subscript):
+        val = node.value
+        if isinstance(val, ast.Name) and val.id in ("List", "list"):
+            return True
+        if isinstance(val, ast.Attribute) and val.attr in ("List", "list"):
+            return True
+    return False
+
+
+def _route_body_returns_dict(func_node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Return True if the function body contains a return of a dict literal."""
+    for node in ast.walk(func_node):
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict):
+            return True
+    return False
+
+
+def _route_body_returns_list(func_node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Return True if the function body contains a return of a list literal or comprehension."""
+    for node in ast.walk(func_node):
+        if isinstance(node, ast.Return) and isinstance(node.value, (ast.List, ast.ListComp)):
+            return True
+    return False
 
 
 # Matches the first line that looks like valid Python — used to drop leading
