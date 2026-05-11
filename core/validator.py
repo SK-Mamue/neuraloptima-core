@@ -70,6 +70,14 @@ class ProjectValidator:
             if schemas.exists():
                 failed.add(schemas)
 
+        # 5) dead enum variant check — deterministic; no LLM call needed
+        for msg in self._check_dead_enum_variants():
+            errors.append(msg)
+            # models.py is where enum definitions live; repair removes the dead member
+            models = self.project_dir / "models.py"
+            if models.exists():
+                failed.add(models)
+
         if errors:
             self.logger.warning(
                 event="validation_failed",
@@ -176,6 +184,43 @@ class ProjectValidator:
                 )
         return errors
 
+    def _check_dead_enum_variants(self) -> list[str]:
+        """Return one error string per enum member defined but never referenced in other files."""
+        _SKIP = {"__pycache__", ".venv", ".git"}
+        all_py: list[Path] = [
+            f for f in sorted(self.project_dir.rglob("*.py"))
+            if not any(part in _SKIP for part in f.relative_to(self.project_dir).parts)
+        ]
+
+        # First occurrence of each class name wins (duplicate check handles the rest)
+        enum_defs: dict[str, tuple[Path, list[tuple[str, str]]]] = {}
+        for py_file in all_py:
+            for class_name, members in _enum_members(py_file).items():
+                if class_name not in enum_defs:
+                    enum_defs[class_name] = (py_file, members)
+
+        errors: list[str] = []
+        for class_name, (defining_file, members) in sorted(enum_defs.items()):
+            other_files = [f for f in all_py if f.resolve() != defining_file.resolve()]
+            rel_others = [str(f.relative_to(self.project_dir)) for f in other_files]
+
+            for member_name, member_value in members:
+                if _references_member_in_files(other_files, member_name, member_value):
+                    continue
+                errors.append(
+                    f"Dead enum variant: '{class_name}.{member_name}' "
+                    f"(value={member_value!r}) is defined in "
+                    f"{defining_file.relative_to(self.project_dir)!s} "
+                    f"but never referenced in any route handler, CRUD function, "
+                    f"request schema, or business logic. "
+                    f"Files inspected: {', '.join(rel_others) or 'none'}. "
+                    f"Fix: remove '{class_name}.{member_name}' from "
+                    f"{defining_file.relative_to(self.project_dir)!s}, "
+                    f"or add a matching API endpoint or business logic path "
+                    f"if the project brief requires it."
+                )
+        return errors
+
     def _collect_context(self, exclude: Path) -> dict[str, str]:
         context: dict[str, str] = {}
         for p in sorted(self.project_dir.glob("*.py")):
@@ -215,6 +260,64 @@ def _enum_class_names(path: Path) -> list[str]:
                 names.append(node.name)
                 break
     return names
+
+
+def _enum_members(path: Path) -> dict[str, list[tuple[str, str]]]:
+    """Return {ClassName: [(MEMBER_NAME, value_str), ...]} for every enum class in a .py file."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (SyntaxError, UnicodeDecodeError):
+        return {}
+    result: dict[str, list[tuple[str, str]]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        is_enum = False
+        for base in node.bases:
+            if isinstance(base, ast.Name) and base.id in _ENUM_BASE_NAMES:
+                is_enum = True
+                break
+            if isinstance(base, ast.Attribute) and base.attr in _ENUM_BASE_NAMES:
+                is_enum = True
+                break
+        if not is_enum:
+            continue
+        members: list[tuple[str, str]] = []
+        for item in node.body:
+            if not isinstance(item, ast.Assign):
+                continue
+            for target in item.targets:
+                if not (isinstance(target, ast.Name) and not target.id.startswith("_")):
+                    continue
+                value = str(item.value.value) if isinstance(item.value, ast.Constant) else ""
+                members.append((target.id, value))
+        if members:
+            result[node.name] = members
+    return result
+
+
+def _references_member_in_files(
+    files: list[Path], member_name: str, member_value: str
+) -> bool:
+    """Return True if any file references the enum member by attribute access or string value."""
+    for path in files:
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for node in ast.walk(tree):
+            # EnumClass.MEMBER_NAME attribute access
+            if isinstance(node, ast.Attribute) and node.attr == member_name:
+                return True
+            # Exact string constant matching the member value (e.g. "restock")
+            if (
+                member_value
+                and isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and node.value.lower() == member_value.lower()
+            ):
+                return True
+    return False
 
 
 # Matches the first line that looks like valid Python — used to drop leading
