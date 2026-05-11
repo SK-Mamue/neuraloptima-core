@@ -195,6 +195,30 @@ memory/sessions/              — JSON session records for all past runs
 memory/reports/               — markdown review reports
 ```
 
+## Documentation Layer (restructured 2026-05-11)
+
+The project documentation was reorganised. The new authoritative human-readable references are:
+
+| File | Role |
+|---|---|
+| `docs/VISION.md` | What NeuralOptima is, long-term goal, philosophy, non-goals |
+| `docs/ARCHITECTURE.md` | Pipeline flow, agent roles, all 7 validation steps, quality layer table, project structure |
+| `docs/HANDOFF.md` | Active sprint state (this file) |
+| `CLAUDE.md` | Claude Code CLI working rules — auto-loaded by the CLI |
+
+Archived (superseded, kept for historical reference):
+
+| File | Reason |
+|---|---|
+| `docs/archive/PRACTICAL_MVC_PLAN.md` | Original MVC design plan; project has grown well past it |
+| `docs/archive/ROADMAP.md` | Static 4-phase outline; superseded by the next-steps section in this file |
+
+The root-level `HANDOFF.md` (session-disconnect note from 2026-05-10) is also superseded by this file and was not removed but can be deleted.
+
+**Important:** No agent reads any of these doc files at runtime. Context reaches the LLM agents exclusively through hardcoded `SYSTEM_PROMPT` strings in `agents/developer.py`, `agents/reviewer.py`, and `core/task_generator.py`.
+
+---
+
 ## Verify State
 
 ```bash
